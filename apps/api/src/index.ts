@@ -21,11 +21,31 @@ const app = new Hono<{ Bindings: Env }>()
 
 app.use("*", cors())
 
+function getExecutionContext(c: { executionCtx: ExecutionContext }): ExecutionContext | undefined {
+  try {
+    return c.executionCtx
+  } catch {
+    return undefined
+  }
+}
+
+async function runAsync(ctx: ExecutionContext | undefined, promise: Promise<unknown>): Promise<void> {
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(promise)
+  } else {
+    await promise
+  }
+}
+
 async function getFromCacheOrFetch(
   request: Request,
-  ctx: ExecutionContext,
+  ctx: ExecutionContext | undefined,
   fetchFn: () => Promise<Response>
 ): Promise<Response> {
+  if (typeof caches === "undefined") {
+    return fetchFn()
+  }
+
   const cache = caches.default
   const cacheKey = new Request(request.url, { method: "GET" })
   
@@ -36,7 +56,7 @@ async function getFromCacheOrFetch(
 
   const response = await fetchFn()
   
-  if (response.ok) {
+  if (response.ok && ctx?.waitUntil) {
     const toCache = response.clone()
     ctx.waitUntil(cache.put(cacheKey, toCache))
   }
@@ -96,7 +116,8 @@ app.post("/api/v1/push", async (c) => {
     : DEFAULT_TTL_SECONDS
   metadata.expiresAt = new Date(now.getTime() + ttlSeconds * 1000).toISOString()
 
-  c.executionCtx.waitUntil(storeContent(c.env, id, body.content, metadata, ttlSeconds))
+  const ctx = getExecutionContext(c)
+  await runAsync(ctx, storeContent(c.env, id, body.content, metadata, ttlSeconds))
 
   const baseUrl = c.env.BASE_URL
   const response: PushResponse = {
@@ -114,13 +135,14 @@ app.post("/api/v1/push", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id")
   const accept = c.req.header("Accept") ?? ""
+  const ctx = getExecutionContext(c)
 
   if (accept.includes("text/html")) {
     const result = await getContent(c.env, id)
     if (!result) {
       return c.json({ error: "Not found" }, 404)
     }
-    c.executionCtx.waitUntil(incrementViews(c.env, id))
+    runAsync(ctx, incrementViews(c.env, id))
     return c.json({
       id: result.metadata.id,
       contentType: result.metadata.contentType,
@@ -132,7 +154,7 @@ app.get("/:id", async (c) => {
     })
   }
 
-  return getFromCacheOrFetch(c.req.raw, c.executionCtx, async () => {
+  return getFromCacheOrFetch(c.req.raw, ctx, async () => {
     const result = await getContent(c.env, id)
     if (!result) {
       return new Response(JSON.stringify({ error: "Not found" }), {
@@ -141,15 +163,16 @@ app.get("/:id", async (c) => {
       })
     }
 
-    c.executionCtx.waitUntil(incrementViews(c.env, id))
+    runAsync(ctx, incrementViews(c.env, id))
     return createCachedResponse(result.content, result.metadata.contentType, result.metadata.expiresAt)
   })
 })
 
 app.get("/:id/raw", async (c) => {
   const id = c.req.param("id")
+  const ctx = getExecutionContext(c)
 
-  return getFromCacheOrFetch(c.req.raw, c.executionCtx, async () => {
+  return getFromCacheOrFetch(c.req.raw, ctx, async () => {
     const result = await getContent(c.env, id)
     if (!result) {
       return new Response(JSON.stringify({ error: "Not found" }), {
@@ -158,7 +181,7 @@ app.get("/:id/raw", async (c) => {
       })
     }
 
-    c.executionCtx.waitUntil(incrementViews(c.env, id))
+    runAsync(ctx, incrementViews(c.env, id))
     return createCachedResponse(result.content, result.metadata.contentType, result.metadata.expiresAt)
   })
 })
