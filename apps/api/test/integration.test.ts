@@ -15,6 +15,15 @@ const createdShares: { id: string; token: string }[] = []
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
+async function waitForContent(id: string, maxRetries = 5): Promise<boolean> {
+  for (let i = 0; i < maxRetries; i++) {
+    const res = await fetch(`${API_URL}/${id}/meta`)
+    if (res.status === 200) return true
+    await sleep(200)
+  }
+  return false
+}
+
 async function push(content: string, options?: Record<string, unknown>): Promise<PushResponse> {
   const res = await fetch(`${API_URL}/api/v1/push`, {
     method: "POST",
@@ -25,7 +34,7 @@ async function push(content: string, options?: Record<string, unknown>): Promise
   if (data.id && data.deleteToken) {
     createdShares.push({ id: data.id, token: data.deleteToken })
   }
-  await sleep(100)
+  await waitForContent(data.id)
   return data
 }
 
@@ -184,7 +193,7 @@ describe("Delete", () => {
     })
     expect(res.status).toBe(200)
     
-    const check = await fetch(`${API_URL}/${data.id}/raw`)
+    const check = await fetch(`${API_URL}/${data.id}/meta`)
     expect(check.status).toBe(404)
   })
 })
