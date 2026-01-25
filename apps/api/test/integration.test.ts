@@ -134,16 +134,17 @@ describe("Get Content", () => {
     expect(res.status).toBe(404)
   })
 
-  it("returns metadata with Accept: text/html", async () => {
+  it("returns HTML page with Accept: text/html", async () => {
     const data = await push("metadata test")
     
     const res = await fetch(`${API_URL}/${data.id}`, {
       headers: { Accept: "text/html" },
     })
     expect(res.status).toBe(200)
-    const meta = await res.json() as Record<string, unknown>
-    expect(meta.id).toBe(data.id)
-    expect(meta.contentType).toBeDefined()
+    expect(res.headers.get("content-type")).toContain("text/html")
+    const html = await res.text()
+    expect(html).toContain("<!DOCTYPE html>")
+    expect(html).toContain("metadata test")
   })
 })
 

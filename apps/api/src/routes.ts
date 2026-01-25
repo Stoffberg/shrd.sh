@@ -17,6 +17,7 @@ import {
   notFoundResponse,
   noCacheResponse,
 } from "./cache"
+import { renderContentPage, render404 } from "./html"
 
 const generateId = customAlphabet("23456789abcdefghjkmnpqrstuvwxyz", 6)
 const generateDeleteToken = customAlphabet(
@@ -84,18 +85,21 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
     if (accept.includes("text/html")) {
       const result = await getContent(c.env, id)
       if (!result) {
-        return c.json({ error: "Not found" }, 404)
+        return c.html(render404(), 404)
       }
-      runAsync(ctx, incrementViews(c.env, id))
-      return c.json({
-        id: result.metadata.id,
-        contentType: result.metadata.contentType,
-        size: result.metadata.size,
-        createdAt: result.metadata.createdAt,
-        expiresAt: result.metadata.expiresAt,
-        views: result.metadata.views + 1,
-        filename: result.metadata.filename,
-      })
+
+      const { metadata, content } = result
+
+      if (metadata.maxViews !== undefined) {
+        await incrementViews(c.env, id)
+        if (metadata.views + 1 >= metadata.maxViews) {
+          runAsync(ctx, deleteContent(c.env, id))
+        }
+      } else {
+        runAsync(ctx, incrementViews(c.env, id))
+      }
+
+      return c.html(renderContentPage(content, metadata, c.env.BASE_URL))
     }
 
     return getFromCacheOrFetch(c.req.raw, ctx, () =>

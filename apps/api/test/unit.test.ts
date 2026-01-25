@@ -215,15 +215,17 @@ describe("Get content endpoints", () => {
     expect(content).toBe("Test content")
   })
 
-  it("returns metadata with Accept: text/html", async () => {
+  it("returns HTML page with Accept: text/html", async () => {
     const res = await app.request(`/${testId}`, {
       headers: { "Accept": "text/html" },
     }, env)
     
     expect(res.status).toBe(200)
-    const body = await res.json() as JsonResponse
-    expect(body.id).toBe(testId)
-    expect(body.contentType).toBeDefined()
+    expect(res.headers.get("content-type")).toContain("text/html")
+    const html = await res.text()
+    expect(html).toContain("<!DOCTYPE html>")
+    expect(html).toContain("Test content")
+    expect(html).toContain("Copy Link")
   })
 
   it("returns 404 for non-existent content", async () => {
