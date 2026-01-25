@@ -172,10 +172,20 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
     if (looksLikeMarkdown(raw)) {
       contentEl.classList.add('markdown');
       contentEl.innerHTML = marked.parse(raw);
+    } else {
+      contentEl.innerHTML = '<pre>' + linkify(escapeHtml(raw)) + '</pre>';
     }
     
     function looksLikeMarkdown(text) {
       return /^#{1,6}\\s|\\*\\*|__|\\[.+\\]\\(|^\\s*[-*+]\\s|^\\s*\\d+\\.\\s|^\`\`\`/m.test(text);
+    }
+    
+    function escapeHtml(text) {
+      return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    
+    function linkify(text) {
+      return text.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
     }
     
     function copyUrl() {
