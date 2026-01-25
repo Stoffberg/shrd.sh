@@ -85,7 +85,7 @@ export function createClient(config: ShrdConfig = {}) {
         throw new Error(`Push failed: ${response.status} - ${error}`);
       }
 
-      return response.json();
+      return response.json() as Promise<PushResult>;
     },
 
     async pull(id: string): Promise<string> {
@@ -119,7 +119,7 @@ export function createClient(config: ShrdConfig = {}) {
         throw new Error(`Meta failed: ${response.status}`);
       }
 
-      return response.json();
+      return response.json() as Promise<ShareMetadata>;
     },
 
     async delete(id: string, deleteToken: string): Promise<void> {

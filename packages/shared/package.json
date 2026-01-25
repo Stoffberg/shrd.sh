@@ -12,9 +12,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "nanoid": "^5.0.9"
+    "nanoid": "^5.1.6"
   },
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "@types/node": "^25.0.10",
+    "typescript": "^5.9.3"
   }
 }

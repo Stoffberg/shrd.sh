@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
 import { app } from "./index"
-import type { Env, StoredContent } from "./types"
+import type { Env } from "./types"
+
+type JsonResponse = Record<string, unknown>
 
 function createMockEnv(): Env {
   const kvStore = new Map<string, string>()
@@ -49,7 +51,7 @@ describe("Health endpoint", () => {
     const res = await app.request("/health", {}, env)
     
     expect(res.status).toBe(200)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.status).toBe("ok")
     expect(body.timestamp).toBeDefined()
   })
@@ -70,7 +72,7 @@ describe("Push endpoint", () => {
     }, env)
 
     expect(res.status).toBe(201)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.id).toBeDefined()
     expect(body.id).toHaveLength(6)
     expect(body.url).toContain(body.id)
@@ -91,7 +93,7 @@ describe("Push endpoint", () => {
     }, env)
 
     expect(res.status).toBe(201)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.id).toBeDefined()
   })
 
@@ -120,10 +122,10 @@ describe("Push endpoint", () => {
     }, env)
 
     expect(res.status).toBe(201)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.expiresAt).toBeDefined()
     
-    const expiresAt = new Date(body.expiresAt)
+    const expiresAt = new Date(body.expiresAt as string)
     const now = new Date()
     const diffSeconds = (expiresAt.getTime() - now.getTime()) / 1000
     expect(diffSeconds).toBeGreaterThan(3500)
@@ -138,7 +140,7 @@ describe("Push endpoint", () => {
     }, env)
 
     expect(res.status).toBe(400)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.error).toBe("Content is required")
   })
 
@@ -160,7 +162,7 @@ describe("Push endpoint", () => {
     }, env)
 
     expect(res.status).toBe(400)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.error).toBe("Invalid JSON")
   })
 
@@ -190,9 +192,9 @@ describe("Get content endpoints", () => {
       body: JSON.stringify({ content: "Test content" }),
     }, env)
     
-    const body = await res.json()
-    testId = body.id
-    deleteToken = body.deleteToken
+    const body = await res.json() as JsonResponse
+    testId = body.id as string
+    deleteToken = body.deleteToken as string
   })
 
   it("retrieves raw content", async () => {
@@ -219,7 +221,7 @@ describe("Get content endpoints", () => {
     }, env)
     
     expect(res.status).toBe(200)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.id).toBe(testId)
     expect(body.contentType).toBeDefined()
   })
@@ -228,7 +230,7 @@ describe("Get content endpoints", () => {
     const res = await app.request("/nonexistent123/raw", {}, env)
     
     expect(res.status).toBe(404)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.error).toBe("Not found")
   })
 })
@@ -250,15 +252,15 @@ describe("Metadata endpoint", () => {
       }),
     }, env)
     
-    const body = await res.json()
-    testId = body.id
+    const body = await res.json() as JsonResponse
+    testId = body.id as string
   })
 
   it("returns metadata for existing content", async () => {
     const res = await app.request(`/${testId}/meta`, {}, env)
     
     expect(res.status).toBe(200)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.id).toBe(testId)
     expect(body.contentType).toBe("text/plain")
     expect(body.filename).toBe("test.txt")
@@ -288,9 +290,9 @@ describe("Delete endpoint", () => {
       body: JSON.stringify({ content: "Delete me" }),
     }, env)
     
-    const body = await res.json()
-    testId = body.id
-    deleteToken = body.deleteToken
+    const body = await res.json() as JsonResponse
+    testId = body.id as string
+    deleteToken = body.deleteToken as string
   })
 
   it("deletes with valid token", async () => {
@@ -300,7 +302,7 @@ describe("Delete endpoint", () => {
     }, env)
     
     expect(res.status).toBe(200)
-    const body = await res.json()
+    const body = await res.json() as JsonResponse
     expect(body.success).toBe(true)
 
     const getRes = await app.request(`/${testId}/raw`, {}, env)
@@ -368,8 +370,8 @@ describe("ID generation", () => {
         body: JSON.stringify({ content: `Test ${i}` }),
       }, env)
       
-      const body = await res.json()
-      ids.add(body.id)
+      const body = await res.json() as JsonResponse
+      ids.add(body.id as string)
     }
     
     expect(ids.size).toBe(10)
@@ -386,7 +388,7 @@ describe("ID generation", () => {
         body: JSON.stringify({ content: `Test ${i}` }),
       }, env)
       
-      const body = await res.json()
+      const body = await res.json() as JsonResponse
       expect(body.id).toMatch(validChars)
     }
   })
