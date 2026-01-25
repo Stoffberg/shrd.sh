@@ -21,6 +21,43 @@ const app = new Hono<{ Bindings: Env }>()
 
 app.use("*", cors())
 
+async function getFromCacheOrFetch(
+  request: Request,
+  ctx: ExecutionContext,
+  fetchFn: () => Promise<Response>
+): Promise<Response> {
+  const cache = caches.default
+  const cacheKey = new Request(request.url, { method: "GET" })
+  
+  const cached = await cache.match(cacheKey)
+  if (cached) {
+    return cached
+  }
+
+  const response = await fetchFn()
+  
+  if (response.ok) {
+    const toCache = response.clone()
+    ctx.waitUntil(cache.put(cacheKey, toCache))
+  }
+  
+  return response
+}
+
+function createCachedResponse(content: string, contentType: string, expiresAt?: string): Response {
+  const ttl = expiresAt
+    ? Math.max(60, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000))
+    : 86400 * 365
+
+  return new Response(content, {
+    status: 200,
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": `public, max-age=${ttl}, immutable`,
+    },
+  })
+}
+
 app.get("/health", (c) => c.json({ status: "ok", timestamp: new Date().toISOString() }))
 
 app.post("/api/v1/push", async (c) => {
@@ -59,7 +96,7 @@ app.post("/api/v1/push", async (c) => {
     : DEFAULT_TTL_SECONDS
   metadata.expiresAt = new Date(now.getTime() + ttlSeconds * 1000).toISOString()
 
-  await storeContent(c.env, id, body.content, metadata, ttlSeconds)
+  c.executionCtx.waitUntil(storeContent(c.env, id, body.content, metadata, ttlSeconds))
 
   const baseUrl = c.env.BASE_URL
   const response: PushResponse = {
@@ -78,14 +115,12 @@ app.get("/:id", async (c) => {
   const id = c.req.param("id")
   const accept = c.req.header("Accept") ?? ""
 
-  const result = await getContent(c.env, id)
-  if (!result) {
-    return c.json({ error: "Not found" }, 404)
-  }
-
-  await incrementViews(c.env, id)
-
   if (accept.includes("text/html")) {
+    const result = await getContent(c.env, id)
+    if (!result) {
+      return c.json({ error: "Not found" }, 404)
+    }
+    c.executionCtx.waitUntil(incrementViews(c.env, id))
     return c.json({
       id: result.metadata.id,
       contentType: result.metadata.contentType,
@@ -97,23 +132,34 @@ app.get("/:id", async (c) => {
     })
   }
 
-  return c.text(result.content, 200, {
-    "Content-Type": result.metadata.contentType,
+  return getFromCacheOrFetch(c.req.raw, c.executionCtx, async () => {
+    const result = await getContent(c.env, id)
+    if (!result) {
+      return new Response(JSON.stringify({ error: "Not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      })
+    }
+
+    c.executionCtx.waitUntil(incrementViews(c.env, id))
+    return createCachedResponse(result.content, result.metadata.contentType, result.metadata.expiresAt)
   })
 })
 
 app.get("/:id/raw", async (c) => {
   const id = c.req.param("id")
 
-  const result = await getContent(c.env, id)
-  if (!result) {
-    return c.json({ error: "Not found" }, 404)
-  }
+  return getFromCacheOrFetch(c.req.raw, c.executionCtx, async () => {
+    const result = await getContent(c.env, id)
+    if (!result) {
+      return new Response(JSON.stringify({ error: "Not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      })
+    }
 
-  await incrementViews(c.env, id)
-
-  return c.text(result.content, 200, {
-    "Content-Type": result.metadata.contentType,
+    c.executionCtx.waitUntil(incrementViews(c.env, id))
+    return createCachedResponse(result.content, result.metadata.contentType, result.metadata.expiresAt)
   })
 })
 
