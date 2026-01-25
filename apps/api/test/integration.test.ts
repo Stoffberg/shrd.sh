@@ -1,6 +1,6 @@
 import { describe, it, expect, afterAll } from "vitest"
 
-const API_URL = process.env.SHRD_API_URL || "https://shrd.stoff.dev"
+const API_URL = import.meta.env.SHRD_API_URL || "https://shrd.stoff.dev"
 
 interface PushResponse {
   id: string
@@ -13,6 +13,8 @@ interface PushResponse {
 
 const createdShares: { id: string; token: string }[] = []
 
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+
 async function push(content: string, options?: Record<string, unknown>): Promise<PushResponse> {
   const res = await fetch(`${API_URL}/api/v1/push`, {
     method: "POST",
@@ -23,6 +25,7 @@ async function push(content: string, options?: Record<string, unknown>): Promise
   if (data.id && data.deleteToken) {
     createdShares.push({ id: data.id, token: data.deleteToken })
   }
+  await sleep(100)
   return data
 }
 

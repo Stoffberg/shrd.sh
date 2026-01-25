@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
-import { app } from "./index"
-import type { Env } from "./types"
+import { app } from "../src/index"
+import type { Env } from "../src/types"
 
 type JsonResponse = Record<string, unknown>
 

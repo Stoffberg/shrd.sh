@@ -104,6 +104,6 @@ jobs:
 
       - name: Run integration tests
         working-directory: apps/api
-        run: pnpm vitest run src/integration.test.ts
+        run: pnpm vitest run test/integration.test.ts
         env:
           SHRD_API_URL: https://shrd.stoff.dev
