@@ -13,6 +13,7 @@ export interface ContentMetadata {
   createdAt: string
   expiresAt?: string
   views: number
+  maxViews?: number
   filename?: string
   storageType: "kv" | "r2"
 }
@@ -27,6 +28,7 @@ export interface PushRequest {
   contentType?: string
   filename?: string
   expiresIn?: number
+  burn?: boolean
 }
 
 export interface PushResponse {

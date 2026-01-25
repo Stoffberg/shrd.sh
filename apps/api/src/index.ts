@@ -105,6 +105,7 @@ app.post("/api/v1/push", async (c) => {
     size: contentSize,
     createdAt: now.toISOString(),
     views: 0,
+    maxViews: body.burn ? 1 : undefined,
     filename: body.filename,
     storageType: "kv",
   }
@@ -132,6 +133,40 @@ app.post("/api/v1/push", async (c) => {
   return c.json(response, 201)
 })
 
+async function handleContentRequest(
+  env: Env,
+  ctx: ExecutionContext | undefined,
+  id: string,
+  request: Request
+): Promise<Response> {
+  const result = await getContent(env, id)
+  if (!result) {
+    return new Response(JSON.stringify({ error: "Not found" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+
+  const { metadata, content } = result
+
+  if (metadata.maxViews !== undefined) {
+    await incrementViews(env, id)
+    if (metadata.views + 1 >= metadata.maxViews) {
+      runAsync(ctx, deleteContent(env, id))
+    }
+    return new Response(content, {
+      status: 200,
+      headers: {
+        "Content-Type": metadata.contentType,
+        "Cache-Control": "no-store",
+      },
+    })
+  }
+
+  runAsync(ctx, incrementViews(env, id))
+  return createCachedResponse(content, metadata.contentType, metadata.expiresAt)
+}
+
 app.get("/:id", async (c) => {
   const id = c.req.param("id")
   const accept = c.req.header("Accept") ?? ""
@@ -154,36 +189,18 @@ app.get("/:id", async (c) => {
     })
   }
 
-  return getFromCacheOrFetch(c.req.raw, ctx, async () => {
-    const result = await getContent(c.env, id)
-    if (!result) {
-      return new Response(JSON.stringify({ error: "Not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      })
-    }
-
-    runAsync(ctx, incrementViews(c.env, id))
-    return createCachedResponse(result.content, result.metadata.contentType, result.metadata.expiresAt)
-  })
+  return getFromCacheOrFetch(c.req.raw, ctx, () => 
+    handleContentRequest(c.env, ctx, id, c.req.raw)
+  )
 })
 
 app.get("/:id/raw", async (c) => {
   const id = c.req.param("id")
   const ctx = getExecutionContext(c)
 
-  return getFromCacheOrFetch(c.req.raw, ctx, async () => {
-    const result = await getContent(c.env, id)
-    if (!result) {
-      return new Response(JSON.stringify({ error: "Not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      })
-    }
-
-    runAsync(ctx, incrementViews(c.env, id))
-    return createCachedResponse(result.content, result.metadata.contentType, result.metadata.expiresAt)
-  })
+  return getFromCacheOrFetch(c.req.raw, ctx, () => 
+    handleContentRequest(c.env, ctx, id, c.req.raw)
+  )
 })
 
 app.get("/:id/meta", async (c) => {

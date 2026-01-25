@@ -92,9 +92,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install
+
       - name: Run integration tests
-        run: |
-          chmod +x tests/integration.sh
-          ./tests/integration.sh
+        working-directory: apps/api
+        run: pnpm vitest run src/integration.test.ts
         env:
           SHRD_API_URL: https://shrd.stoff.dev
