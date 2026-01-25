@@ -8,6 +8,7 @@
     "build": "turbo build",
     "lint": "turbo lint",
     "typecheck": "turbo typecheck",
+    "test": "turbo test",
     "deploy": "turbo deploy",
     "db:generate": "pnpm --filter @shrd/db generate",
     "db:migrate": "pnpm --filter @shrd/db migrate"

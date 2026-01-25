@@ -181,6 +181,8 @@ async function cleanupOrphanedR2(env: Env): Promise<{ deleted: number; checked: 
   return { deleted, checked }
 }
 
+export { app }
+
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {

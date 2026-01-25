@@ -7,7 +7,10 @@
     "dev": "wrangler dev",
     "build": "wrangler deploy --dry-run --outdir=dist",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "better-auth": "^1.2.0",
@@ -18,7 +21,7 @@
     "@cloudflare/vitest-pool-workers": "^0.12.6",
     "@cloudflare/workers-types": "^4.20250109.0",
     "typescript": "^5.7.3",
-    "vitest": "^4.0.18",
+    "vitest": "^3.0.9",
     "wrangler": "^3.101.0"
   }
 }

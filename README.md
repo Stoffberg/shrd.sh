@@ -1,7 +1,7 @@
 # shrd.sh
 
-[![CI](https://github.com/stoffee/shrd.sh/actions/workflows/ci.yml/badge.svg)](https://github.com/stoffee/shrd.sh/actions/workflows/ci.yml)
-[![Deploy](https://github.com/stoffee/shrd.sh/actions/workflows/deploy.yml/badge.svg)](https://github.com/stoffee/shrd.sh/actions/workflows/deploy.yml)
+[![CI](https://github.com/Stoffberg/shrd.sh/actions/workflows/ci.yml/badge.svg)](https://github.com/Stoffberg/shrd.sh/actions/workflows/ci.yml)
+[![Deploy](https://github.com/Stoffberg/shrd.sh/actions/workflows/deploy.yml/badge.svg)](https://github.com/Stoffberg/shrd.sh/actions/workflows/deploy.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > Unix gave us `|` for local pipes. `shrd` makes pipes work across the network.
@@ -11,20 +11,20 @@
 ```bash
 # Share anything
 echo "Hello, World!" | shrd
-→ https://shrd.sh/x7k2m
+# => https://shrd.sh/x7k2m
 
 # Retrieve it anywhere
 shrd x7k2m
-→ Hello, World!
+# => Hello, World!
 ```
 
 ## Features
 
-- **CLI-first** — Designed for the terminal. Pipe, redirect, script.
-- **Fast** — Edge-deployed on Cloudflare's global network. Sub-100ms responses.
-- **Private** — Content auto-expires. E2E encryption available.
-- **No account required** — Just install and go.
-- **AI-ready** — Full REST API, TypeScript SDK, MCP server.
+- **CLI-first** - Designed for the terminal. Pipe, redirect, script.
+- **Fast** - Edge-deployed on Cloudflare's global network. Sub-100ms responses.
+- **Private** - Content auto-expires after 24 hours by default.
+- **No account required** - Just install and go.
+- **AI-ready** - Full REST API and TypeScript SDK.
 
 ## Installation
 
@@ -42,13 +42,7 @@ cargo install shrd
 
 ### Direct Download
 
-Download the latest binary from [Releases](https://github.com/stoffee/shrd.sh/releases).
-
-### npm (wrapper)
-
-```bash
-npx @shrd/cli
-```
+Download the latest binary from [Releases](https://github.com/Stoffberg/shrd.sh/releases).
 
 ## Usage
 
@@ -109,26 +103,9 @@ import { shrd } from '@shrd/sdk';
 
 // Push
 const { url } = await shrd.push('Hello, World!');
-console.log(url); // https://shrd.sh/x7k2m
 
 // Pull
 const content = await shrd.pull('x7k2m');
-
-// With options
-const result = await shrd.push(data, {
-  expire: '7d',
-  type: 'json'
-});
-```
-
-### Self-hosted
-
-```typescript
-import { createClient } from '@shrd/sdk';
-
-const shrd = createClient({
-  baseUrl: 'https://shrd.yourdomain.com'
-});
 ```
 
 ## API
@@ -173,13 +150,9 @@ curl -X DELETE https://shrd.sh/api/v1/x7k2m \
 
 shrd is designed to be easily self-hosted on Cloudflare Workers.
 
-See [SELF_HOSTING.md](SELF_HOSTING.md) for complete instructions.
-
-### Quick Start
-
 ```bash
 # Clone
-git clone https://github.com/stoffee/shrd.sh
+git clone https://github.com/Stoffberg/shrd.sh
 cd shrd.sh
 pnpm install
 
@@ -188,9 +161,7 @@ wrangler d1 create shrd-db
 wrangler kv:namespace create CONTENT
 wrangler r2 bucket create shrd-storage
 
-# Configure
-cp apps/api/wrangler.toml.example apps/api/wrangler.toml
-# Edit wrangler.toml with your IDs
+# Configure wrangler.toml with your IDs
 
 # Deploy
 cd apps/api
@@ -198,35 +169,25 @@ wrangler d1 migrations apply shrd-db --remote
 wrangler deploy
 ```
 
-### CLI Configuration
-
-```bash
-# Set your instance URL
-shrd config set-url https://shrd.yourdomain.com
-
-# Verify
-shrd config show
-```
-
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   Cloudflare Edge                        │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-│  │ Worker   │  │ Worker   │  │ Worker   │   300+ PoPs  │
-│  │ (US)     │  │ (EU)     │  │ (APAC)   │              │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘              │
-│       └─────────────┴─────────────┘                     │
-│                     │                                    │
-│       ┌─────────────┼─────────────┐                     │
-│       ▼             ▼             ▼                     │
-│   ┌───────┐    ┌───────┐    ┌───────┐                  │
-│   │  KV   │    │  R2   │    │  D1   │                  │
-│   │<25KB  │    │ Large │    │ Users │                  │
-│   └───────┘    └───────┘    └───────┘                  │
-└─────────────────────────────────────────────────────────┘
+                     Cloudflare Edge (300+ PoPs)
+    ┌────────────────────────────────────────────────────┐
+    │                                                    │
+    │   ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+    │   │ Worker   │  │ Worker   │  │ Worker   │       │
+    │   │ (US)     │  │ (EU)     │  │ (APAC)   │       │
+    │   └────┬─────┘  └────┬─────┘  └────┬─────┘       │
+    │        └─────────────┴─────────────┘              │
+    │                      │                            │
+    │        ┌─────────────┼─────────────┐             │
+    │        ▼             ▼             ▼             │
+    │    ┌───────┐    ┌───────┐    ┌───────┐          │
+    │    │  KV   │    │  R2   │    │  D1   │          │
+    │    │<25KB  │    │ Large │    │ Users │          │
+    │    └───────┘    └───────┘    └───────┘          │
+    └────────────────────────────────────────────────────┘
 ```
 
 ## Project Structure
@@ -253,19 +214,16 @@ pnpm install
 # Start API locally
 cd apps/api && pnpm dev
 
-# Start web locally
-cd apps/web && pnpm dev
+# Run tests
+pnpm test
 
 # Build CLI
-cd cli && cargo build
-
-# Run tests
-./tests/integration.sh
+cd cli && cargo build --release
 ```
 
 ## Contributing
 
-Contributions are welcome! Please read our contributing guidelines before submitting a PR.
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a PR.
 
 ## License
 
