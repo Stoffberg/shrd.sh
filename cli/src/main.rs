@@ -85,6 +85,89 @@ struct PushRequest {
     encrypt: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    #[serde(rename = "contentType", skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+}
+
+struct ContentInfo {
+    content: String,
+    content_type: Option<String>,
+    filename: Option<String>,
+}
+
+fn read_file(path: &str) -> Result<ContentInfo> {
+    let path_obj = std::path::Path::new(path);
+    let filename = path_obj
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(String::from);
+
+    // Try reading as UTF-8 text first
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let content_type = guess_content_type(path, false);
+        return Ok(ContentInfo {
+            content,
+            content_type,
+            filename,
+        });
+    }
+
+    // Fall back to binary (base64 encoded)
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("Failed to read file: {}", path))?;
+
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let content_type = guess_content_type(path, true);
+
+    Ok(ContentInfo {
+        content: encoded,
+        content_type,
+        filename,
+    })
+}
+
+fn guess_content_type(path: &str, is_binary: bool) -> Option<String> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase());
+
+    match ext.as_deref() {
+        // Text types
+        Some("txt") => Some("text/plain".into()),
+        Some("md") => Some("text/markdown".into()),
+        Some("json") => Some("application/json".into()),
+        Some("xml") => Some("application/xml".into()),
+        Some("html" | "htm") => Some("text/html".into()),
+        Some("css") => Some("text/css".into()),
+        Some("js") => Some("text/javascript".into()),
+        Some("ts") => Some("text/typescript".into()),
+        Some("yaml" | "yml") => Some("text/yaml".into()),
+        Some("csv") => Some("text/csv".into()),
+        Some("rs") => Some("text/x-rust".into()),
+        Some("py") => Some("text/x-python".into()),
+        Some("go") => Some("text/x-go".into()),
+        Some("sh" | "bash") => Some("text/x-shellscript".into()),
+        // Binary types
+        Some("png") => Some("image/png;base64".into()),
+        Some("jpg" | "jpeg") => Some("image/jpeg;base64".into()),
+        Some("gif") => Some("image/gif;base64".into()),
+        Some("webp") => Some("image/webp;base64".into()),
+        Some("svg") => Some("image/svg+xml".into()),
+        Some("pdf") => Some("application/pdf;base64".into()),
+        Some("zip") => Some("application/zip;base64".into()),
+        Some("tar") => Some("application/x-tar;base64".into()),
+        Some("gz") => Some("application/gzip;base64".into()),
+        Some("mp4") => Some("video/mp4;base64".into()),
+        Some("webm") => Some("video/webm;base64".into()),
+        Some("mp3") => Some("audio/mpeg;base64".into()),
+        Some("wav") => Some("audio/wav;base64".into()),
+        _ if is_binary => Some("application/octet-stream;base64".into()),
+        _ => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -274,7 +357,12 @@ fn extract_id(s: &str) -> &str {
     s.trim_start_matches("shrd.sh/").trim_start_matches("shrd.stoff.dev/")
 }
 
-async fn push_content(cli: &Cli, content: String) -> Result<()> {
+async fn push_content(
+    cli: &Cli,
+    content: String,
+    content_type: Option<String>,
+    filename: Option<String>,
+) -> Result<()> {
     let client = reqwest::Client::new();
     let base_url = get_base_url();
 
@@ -284,6 +372,8 @@ async fn push_content(cli: &Cli, content: String) -> Result<()> {
         burn: cli.burn,
         encrypt: cli.encrypt,
         name: cli.name.clone(),
+        content_type,
+        filename,
     };
 
     let body_bytes = serde_json::to_vec(&request)?;
@@ -486,18 +576,17 @@ async fn main() -> Result<()> {
 
     if cli.clipboard {
         let content = get_clipboard()?;
-        return push_content(&cli, content).await;
+        return push_content(&cli, content, None, None).await;
     }
 
     if let Some(ref input) = cli.input {
         if is_valid_id(input) {
             return pull_content(&cli, input).await;
         } else if std::path::Path::new(input).exists() {
-            let content = std::fs::read_to_string(input)
-                .with_context(|| format!("Failed to read file: {}", input))?;
-            return push_content(&cli, content).await;
+            let info = read_file(input)?;
+            return push_content(&cli, info.content, info.content_type, info.filename).await;
         } else {
-            return push_content(&cli, input.clone()).await;
+            return push_content(&cli, input.clone(), None, None).await;
         }
     }
 
@@ -507,7 +596,7 @@ async fn main() -> Result<()> {
         if content.is_empty() {
             anyhow::bail!("No content provided");
         }
-        return push_content(&cli, content).await;
+        return push_content(&cli, content, None, None).await;
     }
 
     println!("{}", "Usage: shrd [OPTIONS] [INPUT]".yellow());
