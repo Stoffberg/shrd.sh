@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use futures::stream::{self, StreamExt};
+use indicatif::{ProgressBar, ProgressStyle};
+use reqwest::Body;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
+use std::time::Instant;
 
 const DEFAULT_BASE_URL: &str = "https://shrd.stoff.dev";
 
@@ -180,6 +184,60 @@ fn clear_auth_token() -> Result<()> {
     Ok(())
 }
 
+const DEFAULT_UPLOAD_SPEED: f64 = 500_000.0; // 500 KB/s conservative default
+
+fn get_upload_speed() -> f64 {
+    let config_dir = match get_config_dir() {
+        Ok(dir) => dir,
+        Err(_) => return DEFAULT_UPLOAD_SPEED,
+    };
+    let config_file = config_dir.join("config.json");
+    let content = match std::fs::read_to_string(&config_file) {
+        Ok(c) => c,
+        Err(_) => return DEFAULT_UPLOAD_SPEED,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(j) => j,
+        Err(_) => return DEFAULT_UPLOAD_SPEED,
+    };
+    json.get("upload_speed_bps")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(DEFAULT_UPLOAD_SPEED)
+}
+
+fn save_upload_speed(speed_bps: f64, body_size: usize) {
+    // Only update speed estimate for meaningful uploads (>50KB)
+    // Small uploads are dominated by latency, not bandwidth
+    if body_size < 50_000 {
+        return;
+    }
+
+    let config_dir = match get_config_dir() {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+    let config_file = config_dir.join("config.json");
+
+    let mut config: serde_json::Value = if config_file.exists() {
+        std::fs::read_to_string(&config_file)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Exponential moving average with new measurement weighted at 30%
+    let old_speed = config
+        .get("upload_speed_bps")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(speed_bps);
+    let new_speed = old_speed * 0.7 + speed_bps * 0.3;
+
+    config["upload_speed_bps"] = serde_json::Value::from(new_speed);
+    let _ = std::fs::write(&config_file, serde_json::to_string_pretty(&config).unwrap_or_default());
+}
+
 #[cfg(feature = "clipboard")]
 fn copy_to_clipboard(text: &str) -> Result<()> {
     use arboard::Clipboard;
@@ -228,13 +286,63 @@ async fn push_content(cli: &Cli, content: String) -> Result<()> {
         name: cli.name.clone(),
     };
 
-    let mut req = client.post(format!("{}/api/v1/push", base_url));
+    let body_bytes = serde_json::to_vec(&request)?;
+    let body_size = body_bytes.len();
+
+    let upload_speed = get_upload_speed();
+    let estimated_seconds = body_size as f64 / upload_speed;
+    let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
+
+
+
+    let progress_bar = if show_progress {
+        let pb = ProgressBar::new(body_size as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
+                .unwrap()
+                .progress_chars("━━─"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        Some(pb)
+    } else {
+        None
+    };
+
+    let start_time = Instant::now();
+
+    let body = if let Some(ref pb) = progress_bar {
+        let pb_clone = pb.clone();
+        let chunk_size = 8192;
+        let chunks: Vec<Vec<u8>> = body_bytes.chunks(chunk_size).map(|c| c.to_vec()).collect();
+
+        let stream = stream::iter(chunks).map(move |chunk| {
+            pb_clone.inc(chunk.len() as u64);
+            Ok::<_, std::io::Error>(chunk)
+        });
+
+        Body::wrap_stream(stream)
+    } else {
+        Body::from(body_bytes)
+    };
+
+    let mut req = client
+        .post(format!("{}/api/v1/push", base_url))
+        .header("Content-Type", "application/json");
 
     if let Some(token) = get_auth_token() {
         req = req.header("Authorization", format!("Bearer {}", token));
     }
 
-    let response = req.json(&request).send().await?;
+    let response = req.body(body).send().await?;
+
+    if let Some(pb) = progress_bar {
+        pb.finish_and_clear();
+    }
+
+    let elapsed = start_time.elapsed();
+    let actual_speed = body_size as f64 / elapsed.as_secs_f64();
+    save_upload_speed(actual_speed, body_size);
 
     if !response.status().is_success() {
         let status = response.status();
