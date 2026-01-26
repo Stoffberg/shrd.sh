@@ -1,6 +1,6 @@
 [package]
 name = "shrd"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Dirk Beukes"]
 description = "Share anything, instantly. CLI for shrd.sh"
