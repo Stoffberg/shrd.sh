@@ -39,3 +39,15 @@ export interface PushResponse {
   deleteToken: string
   expiresAt?: string
 }
+
+export interface MultipartUploadSession {
+  id: string
+  uploadId: string
+  deleteToken: string
+  contentType: string
+  filename?: string
+  expiresIn?: number
+  burn?: boolean
+  parts: { partNumber: number; etag: string }[]
+  createdAt: string
+}

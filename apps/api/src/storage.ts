@@ -51,6 +51,30 @@ export async function getContent(
   return { metadata: stored.metadata, content }
 }
 
+export async function getContentStream(
+  env: Env,
+  id: string
+): Promise<{ metadata: ContentMetadata; body: ReadableStream } | null> {
+  const stored = await env.CONTENT.get<StoredContent>(`content:${id}`, "json")
+  if (!stored) return null
+
+  if (stored.metadata.storageType === "kv" && stored.content) {
+    const encoder = new TextEncoder()
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(stored.content))
+        controller.close()
+      },
+    })
+    return { metadata: stored.metadata, body }
+  }
+
+  const r2Object = await env.STORAGE.get(id)
+  if (!r2Object) return null
+
+  return { metadata: stored.metadata, body: r2Object.body }
+}
+
 export async function getMetadata(
   env: Env,
   id: string

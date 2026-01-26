@@ -7,6 +7,7 @@ use reqwest::Body;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::time::Instant;
+use tokio_util::io::ReaderStream;
 
 const DEFAULT_BASE_URL: &str = "https://shrd.stoff.dev";
 
@@ -91,83 +92,48 @@ struct PushRequest {
     filename: Option<String>,
 }
 
-struct ContentInfo {
-    content: String,
-    content_type: Option<String>,
-    filename: Option<String>,
-}
-
-fn read_file(path: &str) -> Result<ContentInfo> {
-    let path_obj = std::path::Path::new(path);
-    let filename = path_obj
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(String::from);
-
-    // Try reading as UTF-8 text first
-    if let Ok(content) = std::fs::read_to_string(path) {
-        let content_type = guess_content_type(path, false);
-        return Ok(ContentInfo {
-            content,
-            content_type,
-            filename,
-        });
-    }
-
-    // Fall back to binary (base64 encoded)
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read file: {}", path))?;
-
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let content_type = guess_content_type(path, true);
-
-    Ok(ContentInfo {
-        content: encoded,
-        content_type,
-        filename,
-    })
-}
-
-fn guess_content_type(path: &str, is_binary: bool) -> Option<String> {
+fn guess_content_type(path: &str) -> String {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase());
 
     match ext.as_deref() {
-        // Text types
-        Some("txt") => Some("text/plain".into()),
-        Some("md") => Some("text/markdown".into()),
-        Some("json") => Some("application/json".into()),
-        Some("xml") => Some("application/xml".into()),
-        Some("html" | "htm") => Some("text/html".into()),
-        Some("css") => Some("text/css".into()),
-        Some("js") => Some("text/javascript".into()),
-        Some("ts") => Some("text/typescript".into()),
-        Some("yaml" | "yml") => Some("text/yaml".into()),
-        Some("csv") => Some("text/csv".into()),
-        Some("rs") => Some("text/x-rust".into()),
-        Some("py") => Some("text/x-python".into()),
-        Some("go") => Some("text/x-go".into()),
-        Some("sh" | "bash") => Some("text/x-shellscript".into()),
-        // Binary types
-        Some("png") => Some("image/png;base64".into()),
-        Some("jpg" | "jpeg") => Some("image/jpeg;base64".into()),
-        Some("gif") => Some("image/gif;base64".into()),
-        Some("webp") => Some("image/webp;base64".into()),
-        Some("svg") => Some("image/svg+xml".into()),
-        Some("pdf") => Some("application/pdf;base64".into()),
-        Some("zip") => Some("application/zip;base64".into()),
-        Some("tar") => Some("application/x-tar;base64".into()),
-        Some("gz") => Some("application/gzip;base64".into()),
-        Some("mp4") => Some("video/mp4;base64".into()),
-        Some("webm") => Some("video/webm;base64".into()),
-        Some("mp3") => Some("audio/mpeg;base64".into()),
-        Some("wav") => Some("audio/wav;base64".into()),
-        _ if is_binary => Some("application/octet-stream;base64".into()),
-        _ => None,
+        Some("txt") => "text/plain",
+        Some("md") => "text/markdown",
+        Some("json") => "application/json",
+        Some("xml") => "application/xml",
+        Some("html" | "htm") => "text/html",
+        Some("css") => "text/css",
+        Some("js") => "text/javascript",
+        Some("ts") => "text/typescript",
+        Some("yaml" | "yml") => "text/yaml",
+        Some("csv") => "text/csv",
+        Some("rs") => "text/x-rust",
+        Some("py") => "text/x-python",
+        Some("go") => "text/x-go",
+        Some("sh" | "bash") => "text/x-shellscript",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        Some("tar") => "application/x-tar",
+        Some("gz") => "application/gzip",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
+        Some("avi") => "video/x-msvideo",
+        Some("mkv") => "video/x-matroska",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("flac") => "audio/flac",
+        Some("ogg") => "audio/ogg",
+        _ => "application/octet-stream",
     }
+    .into()
 }
 
 #[derive(Deserialize)]
@@ -464,6 +430,240 @@ async fn push_content(
     Ok(())
 }
 
+const MULTIPART_THRESHOLD: u64 = 95 * 1024 * 1024; // 95MB - use multipart for larger
+const PART_SIZE: u64 = 50 * 1024 * 1024; // 50MB parts
+
+async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
+    let path_obj = std::path::Path::new(path);
+    let file_size = std::fs::metadata(path)
+        .with_context(|| format!("Failed to read file: {}", path))?
+        .len();
+
+    if file_size > MULTIPART_THRESHOLD {
+        return upload_file_multipart(cli, path, file_size).await;
+    }
+
+    let filename = path_obj
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let content_type = guess_content_type(path);
+
+    let client = reqwest::Client::new();
+    let base_url = get_base_url();
+
+    let upload_speed = get_upload_speed();
+    let estimated_seconds = file_size as f64 / upload_speed;
+    let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
+
+    let progress_bar = if show_progress {
+        let pb = ProgressBar::new(file_size);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
+                .unwrap()
+                .progress_chars("━━─"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        Some(pb)
+    } else {
+        None
+    };
+
+    let start_time = Instant::now();
+
+    let file = tokio::fs::File::open(path).await
+        .with_context(|| format!("Failed to open file: {}", path))?;
+
+    let body = if let Some(ref pb) = progress_bar {
+        let pb_clone = pb.clone();
+        let stream = ReaderStream::new(file);
+        let stream = stream.map(move |result| {
+            if let Ok(ref chunk) = result {
+                pb_clone.inc(chunk.len() as u64);
+            }
+            result
+        });
+        Body::wrap_stream(stream)
+    } else {
+        let stream = ReaderStream::new(file);
+        Body::wrap_stream(stream)
+    };
+
+    let mut req = client
+        .post(format!("{}/api/v1/upload", base_url))
+        .header("Content-Length", file_size.to_string())
+        .header("X-Content-Type", &content_type)
+        .header("X-Filename", filename);
+
+    if cli.burn {
+        req = req.header("X-Burn", "true");
+    }
+    if let Some(ref expire) = cli.expire {
+        req = req.header("X-Expires-In", expire);
+    }
+    if let Some(token) = get_auth_token() {
+        req = req.header("Authorization", format!("Bearer {}", token));
+    }
+
+    let response = req.body(body).send().await?;
+
+    if let Some(pb) = progress_bar {
+        pb.finish_and_clear();
+    }
+
+    let elapsed = start_time.elapsed();
+    let actual_speed = file_size as f64 / elapsed.as_secs_f64();
+    save_upload_speed(actual_speed, file_size as usize);
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to upload: {} - {}", status, body);
+    }
+
+    let result: PushResponse = response.json().await?;
+    print_result(cli, &result);
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct MultipartInitResponse {
+    id: String,
+    #[serde(rename = "uploadId")]
+    upload_id: String,
+}
+
+async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let path_obj = std::path::Path::new(path);
+    let filename = path_obj
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let content_type = guess_content_type(path);
+
+    let client = reqwest::Client::new();
+    let base_url = get_base_url();
+
+    let mut init_req = client
+        .post(format!("{}/api/v1/multipart/init", base_url))
+        .header("X-Content-Type", &content_type)
+        .header("X-Filename", filename);
+
+    if cli.burn {
+        init_req = init_req.header("X-Burn", "true");
+    }
+    if let Some(ref expire) = cli.expire {
+        init_req = init_req.header("X-Expires-In", expire);
+    }
+
+    let init_response = init_req.send().await?;
+    if !init_response.status().is_success() {
+        anyhow::bail!("Failed to init multipart upload: {}", init_response.status());
+    }
+
+    let init: MultipartInitResponse = init_response.json().await?;
+
+    let upload_speed = get_upload_speed();
+    let estimated_seconds = file_size as f64 / upload_speed;
+    let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
+
+    let progress_bar = if show_progress {
+        let pb = ProgressBar::new(file_size);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
+                .unwrap()
+                .progress_chars("━━─"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        Some(pb)
+    } else {
+        None
+    };
+
+    let start_time = Instant::now();
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut part_number = 1;
+    let mut uploaded = 0u64;
+
+    while uploaded < file_size {
+        let remaining = file_size - uploaded;
+        let part_size = std::cmp::min(PART_SIZE, remaining);
+
+        let mut buffer = vec![0u8; part_size as usize];
+        file.seek(std::io::SeekFrom::Start(uploaded)).await?;
+        file.read_exact(&mut buffer).await?;
+
+        let response = client
+            .put(format!("{}/api/v1/multipart/{}/part/{}", base_url, init.id, part_number))
+            .header("X-Upload-Id", &init.upload_id)
+            .header("Content-Length", part_size.to_string())
+            .body(buffer)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to upload part {}: {} - {}", part_number, status, body);
+        }
+
+        uploaded += part_size;
+        if let Some(ref pb) = progress_bar {
+            pb.set_position(uploaded);
+        }
+        part_number += 1;
+    }
+
+    let complete_response = client
+        .post(format!("{}/api/v1/multipart/{}/complete", base_url, init.id))
+        .header("X-Upload-Id", &init.upload_id)
+        .header("X-Total-Size", file_size.to_string())
+        .send()
+        .await?;
+
+    if let Some(pb) = progress_bar {
+        pb.finish_and_clear();
+    }
+
+    let elapsed = start_time.elapsed();
+    let actual_speed = file_size as f64 / elapsed.as_secs_f64();
+    save_upload_speed(actual_speed, file_size as usize);
+
+    if !complete_response.status().is_success() {
+        let status = complete_response.status();
+        let body = complete_response.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to complete multipart upload: {} - {}", status, body);
+    }
+
+    let result: PushResponse = complete_response.json().await?;
+    print_result(cli, &result);
+    Ok(())
+}
+
+fn print_result(cli: &Cli, result: &PushResponse) {
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "id": result.id,
+            "url": result.url,
+            "rawUrl": result.raw_url,
+            "deleteUrl": result.delete_url,
+            "expiresAt": result.expires_at,
+            "deleteToken": result.delete_token,
+        })).unwrap_or_default());
+    } else if !cli.quiet {
+        println!("{} {}", "→".green(), result.url.cyan());
+        if !cli.no_copy {
+            if copy_to_clipboard(&result.url).is_ok() {
+                eprintln!("{}", "(copied to clipboard)".dimmed());
+            }
+        }
+    }
+}
+
 async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
     let client = reqwest::Client::new();
     let base_url = get_base_url();
@@ -583,8 +783,8 @@ async fn main() -> Result<()> {
         if is_valid_id(input) {
             return pull_content(&cli, input).await;
         } else if std::path::Path::new(input).exists() {
-            let info = read_file(input)?;
-            return push_content(&cli, info.content, info.content_type, info.filename).await;
+            // Always use streaming for files - faster, no size limits
+            return upload_file_streaming(&cli, input).await;
         } else {
             return push_content(&cli, input.clone(), None, None).await;
         }
