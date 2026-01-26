@@ -18,7 +18,7 @@ import {
   notFoundResponse,
   noCacheResponse,
 } from "./cache"
-import { renderContentPage, render404 } from "./html"
+import { renderContentPage, renderBinaryPage, render404, isBinaryContent } from "./html"
 
 const generateId = customAlphabet("23456789abcdefghjkmnpqrstuvwxyz", 6)
 const generateDeleteToken = customAlphabet(
@@ -84,12 +84,10 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
     const ctx = getExecutionContext(c)
 
     if (accept.includes("text/html")) {
-      const result = await getContent(c.env, id)
-      if (!result) {
+      const metadata = await getMetadata(c.env, id)
+      if (!metadata) {
         return c.html(render404(), 404)
       }
-
-      const { metadata, content } = result
 
       if (metadata.maxViews !== undefined) {
         await incrementViews(c.env, id)
@@ -100,7 +98,16 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
         runAsync(ctx, incrementViews(c.env, id))
       }
 
-      return c.html(renderContentPage(content, metadata, c.env.BASE_URL))
+      if (isBinaryContent(metadata.contentType)) {
+        return c.html(renderBinaryPage(metadata, c.env.BASE_URL))
+      }
+
+      const result = await getContent(c.env, id)
+      if (!result) {
+        return c.html(render404(), 404)
+      }
+
+      return c.html(renderContentPage(result.content, metadata, c.env.BASE_URL))
     }
 
     return getFromCacheOrFetch(c.req.raw, ctx, () =>

@@ -9,6 +9,182 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#039;")
 }
 
+export function isBinaryContent(contentType: string): boolean {
+  return (
+    contentType.startsWith("image/") ||
+    contentType.startsWith("video/") ||
+    contentType.startsWith("audio/") ||
+    contentType.startsWith("application/pdf") ||
+    contentType.startsWith("application/zip") ||
+    contentType.startsWith("application/octet-stream") ||
+    contentType.startsWith("application/gzip") ||
+    contentType.startsWith("application/x-tar")
+  )
+}
+
+export function renderBinaryPage(metadata: ContentMetadata, baseUrl: string): string {
+  const isBurn = metadata.maxViews !== undefined
+  const viewsLeft = isBurn ? metadata.maxViews! - metadata.views - 1 : null
+  const isLastView = viewsLeft === 0
+  const rawUrl = `${baseUrl}/${metadata.id}/raw`
+  const contentType = metadata.contentType
+
+  let mediaElement = ""
+  if (contentType.startsWith("video/")) {
+    mediaElement = `<video controls autoplay class="media"><source src="${rawUrl}" type="${contentType}">Your browser does not support video.</video>`
+  } else if (contentType.startsWith("audio/")) {
+    mediaElement = `<audio controls class="media"><source src="${rawUrl}" type="${contentType}">Your browser does not support audio.</audio>`
+  } else if (contentType.startsWith("image/")) {
+    mediaElement = `<img src="${rawUrl}" class="media" alt="${metadata.filename || 'image'}">`
+  } else if (contentType === "application/pdf") {
+    mediaElement = `<iframe src="${rawUrl}" class="media pdf"></iframe>`
+  } else {
+    mediaElement = `<div class="download-box"><a href="${rawUrl}" download="${metadata.filename || metadata.id}" class="download-btn">Download File</a><p class="file-info">${metadata.filename || 'file'} · ${formatSize(metadata.size)}</p></div>`
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${metadata.filename || metadata.id}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0a0a0a;
+      color: #e5e5e5;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid #262626;
+    }
+    .url {
+      font-family: monospace;
+      font-size: 0.875rem;
+      color: #737373;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .btn {
+      background: #262626;
+      border: 1px solid #404040;
+      color: #e5e5e5;
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.875rem;
+      text-decoration: none;
+      transition: background 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: #333; }
+    .warning {
+      background: #451a03;
+      border: 1px solid #92400e;
+      color: #fbbf24;
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+    }
+    .warning.last {
+      background: #450a0a;
+      border-color: #991b1b;
+      color: #f87171;
+    }
+    .media {
+      max-width: 100%;
+      max-height: 80vh;
+      border-radius: 8px;
+      background: #171717;
+    }
+    .media.pdf {
+      width: 100%;
+      height: 80vh;
+      border: 1px solid #262626;
+    }
+    video, audio { width: 100%; }
+    .download-box {
+      background: #171717;
+      border: 1px solid #262626;
+      border-radius: 8px;
+      padding: 3rem;
+      text-align: center;
+    }
+    .download-btn {
+      display: inline-block;
+      background: #2563eb;
+      color: white;
+      padding: 1rem 2rem;
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 1.1rem;
+      margin-bottom: 1rem;
+    }
+    .download-btn:hover { background: #1d4ed8; }
+    .file-info { color: #737373; }
+    .meta {
+      margin-top: 1rem;
+      font-size: 0.75rem;
+      color: #525252;
+    }
+    .copied {
+      position: fixed;
+      bottom: 2rem;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #166534;
+      color: #fff;
+      padding: 0.75rem 1.5rem;
+      border-radius: 6px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .copied.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <span class="url">${rawUrl}</span>
+      <button class="btn" onclick="copyUrl()">Copy Link</button>
+      <a href="${rawUrl}" download class="btn">Download</a>
+    </div>
+    ${isBurn ? `
+    <div class="warning${isLastView ? ' last' : ''}">
+      ${isLastView 
+        ? 'This content will be deleted after you leave this page.' 
+        : `This content will be deleted after ${viewsLeft} more view${viewsLeft === 1 ? '' : 's'}.`}
+    </div>
+    ` : ''}
+    ${mediaElement}
+    <div class="meta">
+      ${metadata.filename ? `${metadata.filename} · ` : ''}${formatSize(metadata.size)}${metadata.expiresAt ? ` · expires ${formatDate(metadata.expiresAt)}` : ''}
+    </div>
+  </div>
+  <div class="copied" id="copied">Copied!</div>
+  <script>
+    function copyUrl() {
+      navigator.clipboard.writeText('${rawUrl}');
+      const el = document.getElementById('copied');
+      el.classList.add('show');
+      setTimeout(() => el.classList.remove('show'), 1500);
+    }
+  </script>
+</body>
+</html>`
+}
+
 export function renderContentPage(content: string, metadata: ContentMetadata, baseUrl: string): string {
   const escaped = escapeHtml(content)
   const isBurn = metadata.maxViews !== undefined
