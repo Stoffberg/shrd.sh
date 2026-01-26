@@ -161,6 +161,7 @@ struct ShareMeta {
     created_at: String,
     #[serde(rename = "expiresAt")]
     expires_at: Option<String>,
+    filename: Option<String>,
 }
 
 fn get_base_url() -> String {
@@ -585,7 +586,6 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     };
 
     let start_time = Instant::now();
-    let mut file = tokio::fs::File::open(path).await?;
     let mut part_number = 1;
     let mut uploaded = 0u64;
 
@@ -593,15 +593,30 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
         let remaining = file_size - uploaded;
         let part_size = std::cmp::min(PART_SIZE, remaining);
 
-        let mut buffer = vec![0u8; part_size as usize];
+        let mut file = tokio::fs::File::open(path).await?;
         file.seek(std::io::SeekFrom::Start(uploaded)).await?;
-        file.read_exact(&mut buffer).await?;
+        let limited = file.take(part_size);
+
+        let body = if let Some(ref pb) = progress_bar {
+            let pb_clone = pb.clone();
+            let stream = ReaderStream::new(limited);
+            let stream = stream.map(move |result| {
+                if let Ok(ref chunk) = result {
+                    pb_clone.inc(chunk.len() as u64);
+                }
+                result
+            });
+            Body::wrap_stream(stream)
+        } else {
+            let stream = ReaderStream::new(limited);
+            Body::wrap_stream(stream)
+        };
 
         let response = client
             .put(format!("{}/api/v1/multipart/{}/part/{}", base_url, init.id, part_number))
             .header("X-Upload-Id", &init.upload_id)
             .header("Content-Length", part_size.to_string())
-            .body(buffer)
+            .body(body)
             .send()
             .await?;
 
@@ -612,9 +627,6 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
         }
 
         uploaded += part_size;
-        if let Some(ref pb) = progress_bar {
-            pb.set_position(uploaded);
-        }
         part_number += 1;
     }
 
@@ -664,7 +676,44 @@ fn print_result(cli: &Cli, result: &PushResponse) {
     }
 }
 
+fn is_binary_content_type(content_type: &str) -> bool {
+    content_type.starts_with("image/")
+        || content_type.starts_with("video/")
+        || content_type.starts_with("audio/")
+        || content_type.starts_with("application/octet-stream")
+        || content_type.starts_with("application/pdf")
+        || content_type.starts_with("application/zip")
+        || content_type.starts_with("application/gzip")
+        || content_type.starts_with("application/x-tar")
+}
+
+fn get_unique_filename(filename: &str) -> String {
+    if !std::path::Path::new(filename).exists() {
+        return filename.to_string();
+    }
+
+    let path = std::path::Path::new(filename);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(filename);
+    let ext = path.extension().and_then(|e| e.to_str());
+
+    for i in 1..1000 {
+        let new_name = match ext {
+            Some(e) => format!("{} ({}).{}", stem, i, e),
+            None => format!("{} ({})", stem, i),
+        };
+        if !std::path::Path::new(&new_name).exists() {
+            return new_name;
+        }
+    }
+    format!("{}.{}", filename, std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs())
+}
+
 async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
     let client = reqwest::Client::new();
     let base_url = get_base_url();
     let id = extract_id(id);
@@ -684,22 +733,96 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
 
         let meta: ShareMeta = response.json().await?;
         println!("{}", serde_json::to_string_pretty(&meta)?);
-    } else {
-        let response = client
-            .get(format!("{}/{}/raw", base_url, id))
-            .send()
-            .await?;
+        return Ok(());
+    }
 
-        if !response.status().is_success() {
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                anyhow::bail!("Share not found or expired");
+    let meta_response = client
+        .get(format!("{}/{}/meta", base_url, id))
+        .send()
+        .await?;
+
+    if !meta_response.status().is_success() {
+        if meta_response.status() == reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("Share not found or expired");
+        }
+        anyhow::bail!("Failed to fetch: {}", meta_response.status());
+    }
+
+    let meta: ShareMeta = meta_response.json().await?;
+    let is_binary = is_binary_content_type(&meta.content_type);
+    let is_tty = atty::is(atty::Stream::Stdout);
+
+    let response = client
+        .get(format!("{}/{}/raw", base_url, id))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("Share not found or expired");
+        }
+        anyhow::bail!("Failed to fetch: {}", response.status());
+    }
+
+    let content_length = meta.size;
+    let upload_speed = get_upload_speed();
+    let estimated_seconds = content_length as f64 / upload_speed;
+    let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json && is_tty;
+
+    let progress_bar = if show_progress {
+        let pb = ProgressBar::new(content_length);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
+                .unwrap()
+                .progress_chars("━━─"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        Some(pb)
+    } else {
+        None
+    };
+
+    if is_binary && is_tty {
+        let default_filename = format!("{}.bin", id);
+        let filename = meta.filename.as_deref().unwrap_or(&default_filename);
+        let save_path = get_unique_filename(filename);
+
+        let mut file = tokio::fs::File::create(&save_path).await?;
+        let mut stream = response.bytes_stream();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if let Some(ref pb) = progress_bar {
+                pb.inc(chunk.len() as u64);
             }
-            anyhow::bail!("Failed to fetch: {}", response.status());
+            file.write_all(&chunk).await?;
         }
 
-        let content = response.text().await?;
-        print!("{}", content);
-        io::stdout().flush()?;
+        if let Some(pb) = progress_bar {
+            pb.finish_and_clear();
+        }
+
+        if !cli.quiet {
+            println!("{} {}", "→".green(), save_path.cyan());
+        }
+    } else {
+        let mut stream = response.bytes_stream();
+        let mut stdout = tokio::io::stdout();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if let Some(ref pb) = progress_bar {
+                pb.inc(chunk.len() as u64);
+            }
+            stdout.write_all(&chunk).await?;
+        }
+
+        if let Some(pb) = progress_bar {
+            pb.finish_and_clear();
+        }
+
+        stdout.flush().await?;
     }
 
     Ok(())
