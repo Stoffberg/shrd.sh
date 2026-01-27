@@ -1,15 +1,97 @@
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Body;
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::time::Instant;
 use tokio_util::io::ReaderStream;
 
 const DEFAULT_BASE_URL: &str = "https://shrd.stoff.dev";
+const KEY_LEN: usize = 32;
+
+fn encrypt_content(plaintext: &[u8]) -> Result<(Vec<u8>, String)> {
+    let rng = SystemRandom::new();
+
+    let mut key_bytes = [0u8; KEY_LEN];
+    rng.fill(&mut key_bytes)
+        .map_err(|_| anyhow::anyhow!("Failed to generate encryption key"))?;
+
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    rng.fill(&mut nonce_bytes)
+        .map_err(|_| anyhow::anyhow!("Failed to generate nonce"))?;
+
+    let unbound_key = UnboundKey::new(&AES_256_GCM, &key_bytes)
+        .map_err(|_| anyhow::anyhow!("Failed to create encryption key"))?;
+    let key = LessSafeKey::new(unbound_key);
+
+    let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+
+    let mut ciphertext = plaintext.to_vec();
+    key.seal_in_place_append_tag(nonce, Aad::empty(), &mut ciphertext)
+        .map_err(|_| anyhow::anyhow!("Encryption failed"))?;
+
+    let mut result = nonce_bytes.to_vec();
+    result.extend(ciphertext);
+
+    let key_b64 = URL_SAFE_NO_PAD.encode(key_bytes);
+
+    Ok((result, key_b64))
+}
+
+fn decrypt_content(ciphertext: &[u8], key_b64: &str) -> Result<Vec<u8>> {
+    if ciphertext.len() < NONCE_LEN {
+        anyhow::bail!("Invalid encrypted content: too short");
+    }
+
+    let key_bytes = URL_SAFE_NO_PAD
+        .decode(key_b64)
+        .context("Invalid encryption key")?;
+
+    if key_bytes.len() != KEY_LEN {
+        anyhow::bail!("Invalid encryption key length");
+    }
+
+    let nonce_bytes: [u8; NONCE_LEN] = ciphertext[..NONCE_LEN]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Invalid nonce"))?;
+    let encrypted = &ciphertext[NONCE_LEN..];
+
+    let unbound_key = UnboundKey::new(&AES_256_GCM, &key_bytes)
+        .map_err(|_| anyhow::anyhow!("Failed to create decryption key"))?;
+    let key = LessSafeKey::new(unbound_key);
+
+    let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+
+    let mut plaintext = encrypted.to_vec();
+    key.open_in_place(nonce, Aad::empty(), &mut plaintext)
+        .map_err(|_| anyhow::anyhow!("Decryption failed - invalid key or corrupted data"))?;
+
+    let tag_len = AES_256_GCM.tag_len();
+    plaintext.truncate(plaintext.len() - tag_len);
+
+    Ok(plaintext)
+}
+
+fn parse_id_and_key(input: &str) -> (String, Option<String>) {
+    if let Some(hash_pos) = input.find('#') {
+        let id = input[..hash_pos].to_string();
+        let fragment = &input[hash_pos + 1..];
+        let key = if fragment.starts_with("key=") {
+            Some(fragment[4..].to_string())
+        } else {
+            Some(fragment.to_string())
+        };
+        (id, key)
+    } else {
+        (input.to_string(), None)
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "shrd")]
@@ -27,9 +109,6 @@ struct Cli {
 
     #[arg(short, long, help = "Delete after first view")]
     burn: bool,
-
-    #[arg(short, long, help = "End-to-end encrypt")]
-    encrypt: bool,
 
     #[arg(short, long, help = "Custom name/slug")]
     name: Option<String>,
@@ -82,8 +161,6 @@ struct PushRequest {
     expire: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     burn: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    encrypt: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(rename = "contentType", skip_serializing_if = "Option::is_none")]
@@ -333,11 +410,13 @@ async fn push_content(
     let client = reqwest::Client::new();
     let base_url = get_base_url();
 
+    let (encrypted_content, encryption_key) = encrypt_content(content.as_bytes())?;
+    let encoded_content = base64::engine::general_purpose::STANDARD.encode(&encrypted_content);
+
     let request = PushRequest {
-        content,
+        content: encoded_content,
         expire: cli.expire.clone(),
         burn: cli.burn,
-        encrypt: cli.encrypt,
         name: cli.name.clone(),
         content_type,
         filename,
@@ -408,25 +487,7 @@ async fn push_content(
     }
 
     let result: PushResponse = response.json().await?;
-
-    if cli.json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "id": result.id,
-            "url": result.url,
-            "rawUrl": result.raw_url,
-            "deleteUrl": result.delete_url,
-            "expiresAt": result.expires_at,
-            "deleteToken": result.delete_token,
-        }))?);
-    } else if !cli.quiet {
-        println!("{} {}", "→".green(), result.url.cyan());
-
-        if !cli.no_copy {
-            if copy_to_clipboard(&result.url).is_ok() {
-                eprintln!("{}", "(copied to clipboard)".dimmed());
-            }
-        }
-    }
+    print_result(cli, &result, &encryption_key);
 
     Ok(())
 }
@@ -453,12 +514,17 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     let client = reqwest::Client::new();
     let base_url = get_base_url();
 
+    let file_content = std::fs::read(path)
+        .with_context(|| format!("Failed to read file: {}", path))?;
+    let (encrypted_content, encryption_key) = encrypt_content(&file_content)?;
+    let encrypted_size = encrypted_content.len() as u64;
+
     let upload_speed = get_upload_speed();
-    let estimated_seconds = file_size as f64 / upload_speed;
+    let estimated_seconds = encrypted_size as f64 / upload_speed;
     let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
 
     let progress_bar = if show_progress {
-        let pb = ProgressBar::new(file_size);
+        let pb = ProgressBar::new(encrypted_size);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
@@ -473,27 +539,22 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
 
     let start_time = Instant::now();
 
-    let file = tokio::fs::File::open(path).await
-        .with_context(|| format!("Failed to open file: {}", path))?;
-
     let body = if let Some(ref pb) = progress_bar {
         let pb_clone = pb.clone();
-        let stream = ReaderStream::new(file);
-        let stream = stream.map(move |result| {
-            if let Ok(ref chunk) = result {
-                pb_clone.inc(chunk.len() as u64);
-            }
-            result
+        let chunk_size = 8192;
+        let chunks: Vec<Vec<u8>> = encrypted_content.chunks(chunk_size).map(|c| c.to_vec()).collect();
+        let stream = stream::iter(chunks).map(move |chunk| {
+            pb_clone.inc(chunk.len() as u64);
+            Ok::<_, std::io::Error>(chunk)
         });
         Body::wrap_stream(stream)
     } else {
-        let stream = ReaderStream::new(file);
-        Body::wrap_stream(stream)
+        Body::from(encrypted_content)
     };
 
     let mut req = client
         .post(format!("{}/api/v1/upload", base_url))
-        .header("Content-Length", file_size.to_string())
+        .header("Content-Length", encrypted_size.to_string())
         .header("X-Content-Type", &content_type)
         .header("X-Filename", filename);
 
@@ -514,8 +575,8 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     }
 
     let elapsed = start_time.elapsed();
-    let actual_speed = file_size as f64 / elapsed.as_secs_f64();
-    save_upload_speed(actual_speed, file_size as usize);
+    let actual_speed = encrypted_size as f64 / elapsed.as_secs_f64();
+    save_upload_speed(actual_speed, encrypted_size as usize);
 
     if !response.status().is_success() {
         let status = response.status();
@@ -524,7 +585,7 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     }
 
     let result: PushResponse = response.json().await?;
-    print_result(cli, &result);
+    print_result(cli, &result, &encryption_key);
     Ok(())
 }
 
@@ -535,9 +596,7 @@ struct MultipartInitResponse {
     upload_id: String,
 }
 
-async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
+async fn upload_file_multipart(cli: &Cli, path: &str, _file_size: u64) -> Result<()> {
     let path_obj = std::path::Path::new(path);
     let filename = path_obj
         .file_name()
@@ -547,6 +606,11 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
 
     let client = reqwest::Client::new();
     let base_url = get_base_url();
+
+    let file_content = std::fs::read(path)
+        .with_context(|| format!("Failed to read file: {}", path))?;
+    let (encrypted_content, encryption_key) = encrypt_content(&file_content)?;
+    let encrypted_size = encrypted_content.len() as u64;
 
     let mut init_req = client
         .post(format!("{}/api/v1/multipart/init", base_url))
@@ -568,11 +632,11 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     let init: MultipartInitResponse = init_response.json().await?;
 
     let upload_speed = get_upload_speed();
-    let estimated_seconds = file_size as f64 / upload_speed;
+    let estimated_seconds = encrypted_size as f64 / upload_speed;
     let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
 
     let progress_bar = if show_progress {
-        let pb = ProgressBar::new(file_size);
+        let pb = ProgressBar::new(encrypted_size);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
@@ -589,27 +653,22 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     let mut part_number = 1;
     let mut uploaded = 0u64;
 
-    while uploaded < file_size {
-        let remaining = file_size - uploaded;
-        let part_size = std::cmp::min(PART_SIZE, remaining);
-
-        let mut file = tokio::fs::File::open(path).await?;
-        file.seek(std::io::SeekFrom::Start(uploaded)).await?;
-        let limited = file.take(part_size);
+    while uploaded < encrypted_size {
+        let remaining = encrypted_size - uploaded;
+        let part_size = std::cmp::min(PART_SIZE, remaining) as usize;
+        let part_data = encrypted_content[uploaded as usize..(uploaded as usize + part_size)].to_vec();
 
         let body = if let Some(ref pb) = progress_bar {
             let pb_clone = pb.clone();
-            let stream = ReaderStream::new(limited);
-            let stream = stream.map(move |result| {
-                if let Ok(ref chunk) = result {
-                    pb_clone.inc(chunk.len() as u64);
-                }
-                result
+            let chunk_size = 8192;
+            let chunks: Vec<Vec<u8>> = part_data.chunks(chunk_size).map(|c| c.to_vec()).collect();
+            let stream = stream::iter(chunks).map(move |chunk| {
+                pb_clone.inc(chunk.len() as u64);
+                Ok::<_, std::io::Error>(chunk)
             });
             Body::wrap_stream(stream)
         } else {
-            let stream = ReaderStream::new(limited);
-            Body::wrap_stream(stream)
+            Body::from(part_data)
         };
 
         let response = client
@@ -626,14 +685,14 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
             anyhow::bail!("Failed to upload part {}: {} - {}", part_number, status, body);
         }
 
-        uploaded += part_size;
+        uploaded += part_size as u64;
         part_number += 1;
     }
 
     let complete_response = client
         .post(format!("{}/api/v1/multipart/{}/complete", base_url, init.id))
         .header("X-Upload-Id", &init.upload_id)
-        .header("X-Total-Size", file_size.to_string())
+        .header("X-Total-Size", encrypted_size.to_string())
         .send()
         .await?;
 
@@ -642,8 +701,8 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     }
 
     let elapsed = start_time.elapsed();
-    let actual_speed = file_size as f64 / elapsed.as_secs_f64();
-    save_upload_speed(actual_speed, file_size as usize);
+    let actual_speed = encrypted_size as f64 / elapsed.as_secs_f64();
+    save_upload_speed(actual_speed, encrypted_size as usize);
 
     if !complete_response.status().is_success() {
         let status = complete_response.status();
@@ -652,24 +711,27 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     }
 
     let result: PushResponse = complete_response.json().await?;
-    print_result(cli, &result);
+    print_result(cli, &result, &encryption_key);
     Ok(())
 }
 
-fn print_result(cli: &Cli, result: &PushResponse) {
+fn print_result(cli: &Cli, result: &PushResponse, encryption_key: &str) {
+    let url_with_key = format!("{}#{}", result.url, encryption_key);
+    let raw_url_with_key = format!("{}#{}", result.raw_url, encryption_key);
+
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "id": result.id,
-            "url": result.url,
-            "rawUrl": result.raw_url,
+            "url": url_with_key,
+            "rawUrl": raw_url_with_key,
             "deleteUrl": result.delete_url,
             "expiresAt": result.expires_at,
             "deleteToken": result.delete_token,
         })).unwrap_or_default());
     } else if !cli.quiet {
-        println!("{} {}", "→".green(), result.url.cyan());
+        println!("{} {}", "→".green(), url_with_key.cyan());
         if !cli.no_copy {
-            if copy_to_clipboard(&result.url).is_ok() {
+            if copy_to_clipboard(&url_with_key).is_ok() {
                 eprintln!("{}", "(copied to clipboard)".dimmed());
             }
         }
@@ -933,4 +995,125 @@ async fn main() -> Result<()> {
     println!("Run {} for more options.", "shrd --help".cyan());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let original = b"Hello, World!";
+        let (ciphertext, key) = encrypt_content(original).expect("encryption failed");
+        let decrypted = decrypt_content(&ciphertext, &key).expect("decryption failed");
+        assert_eq!(original.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn encrypt_decrypt_empty_content() {
+        let original = b"";
+        let (ciphertext, key) = encrypt_content(original).expect("encryption failed");
+        let decrypted = decrypt_content(&ciphertext, &key).expect("decryption failed");
+        assert_eq!(original.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn encrypt_decrypt_unicode() {
+        let original = "Hello 世界 🌍 Привет мир".as_bytes();
+        let (ciphertext, key) = encrypt_content(original).expect("encryption failed");
+        let decrypted = decrypt_content(&ciphertext, &key).expect("decryption failed");
+        assert_eq!(original.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn encrypt_decrypt_large_content() {
+        let original: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
+        let (ciphertext, key) = encrypt_content(&original).expect("encryption failed");
+        let decrypted = decrypt_content(&ciphertext, &key).expect("decryption failed");
+        assert_eq!(original, decrypted);
+    }
+
+    #[test]
+    fn encrypt_produces_different_ciphertext_each_time() {
+        let original = b"Same content";
+        let (ciphertext1, _key1) = encrypt_content(original).expect("encryption failed");
+        let (ciphertext2, _key2) = encrypt_content(original).expect("encryption failed");
+        assert_ne!(ciphertext1, ciphertext2, "ciphertext should differ due to random nonce/key");
+    }
+
+    #[test]
+    fn decrypt_fails_with_wrong_key() {
+        let original = b"Secret data";
+        let (ciphertext, _correct_key) = encrypt_content(original).expect("encryption failed");
+        
+        let wrong_key = URL_SAFE_NO_PAD.encode([0u8; KEY_LEN]);
+        let result = decrypt_content(&ciphertext, &wrong_key);
+        assert!(result.is_err(), "decryption should fail with wrong key");
+    }
+
+    #[test]
+    fn decrypt_fails_with_corrupted_ciphertext() {
+        let original = b"Secret data";
+        let (mut ciphertext, key) = encrypt_content(original).expect("encryption failed");
+        
+        if let Some(byte) = ciphertext.get_mut(NONCE_LEN + 5) {
+            *byte ^= 0xFF;
+        }
+        
+        let result = decrypt_content(&ciphertext, &key);
+        assert!(result.is_err(), "decryption should fail with corrupted ciphertext");
+    }
+
+    #[test]
+    fn decrypt_fails_with_truncated_ciphertext() {
+        let result = decrypt_content(&[0u8; 5], "some_key");
+        assert!(result.is_err(), "decryption should fail with too-short ciphertext");
+    }
+
+    #[test]
+    fn decrypt_fails_with_invalid_key_length() {
+        let original = b"Secret data";
+        let (ciphertext, _key) = encrypt_content(original).expect("encryption failed");
+        
+        let short_key = URL_SAFE_NO_PAD.encode([0u8; 16]);
+        let result = decrypt_content(&ciphertext, &short_key);
+        assert!(result.is_err(), "decryption should fail with wrong key length");
+    }
+
+    #[test]
+    fn ciphertext_contains_nonce_prefix() {
+        let original = b"Test";
+        let (ciphertext, _key) = encrypt_content(original).expect("encryption failed");
+        assert!(ciphertext.len() >= NONCE_LEN, "ciphertext should contain nonce prefix");
+    }
+
+    #[test]
+    fn key_is_valid_base64() {
+        let original = b"Test";
+        let (_ciphertext, key) = encrypt_content(original).expect("encryption failed");
+        let decoded = URL_SAFE_NO_PAD.decode(&key);
+        assert!(decoded.is_ok(), "key should be valid base64");
+        assert_eq!(decoded.unwrap().len(), KEY_LEN, "decoded key should be 32 bytes");
+    }
+
+    #[test]
+    fn parse_id_and_key_with_key() {
+        let (id, key) = parse_id_and_key("abc123#mykey");
+        assert_eq!(id, "abc123");
+        assert_eq!(key, Some("mykey".to_string()));
+    }
+
+    #[test]
+    fn parse_id_and_key_with_key_prefix() {
+        let (id, key) = parse_id_and_key("abc123#key=mykey");
+        assert_eq!(id, "abc123");
+        assert_eq!(key, Some("mykey".to_string()));
+    }
+
+    #[test]
+    fn parse_id_and_key_without_key() {
+        let (id, key) = parse_id_and_key("abc123");
+        assert_eq!(id, "abc123");
+        assert_eq!(key, None);
+    }
 }

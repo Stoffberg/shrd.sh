@@ -3,17 +3,17 @@
 [![CI](https://github.com/Stoffberg/shrd.sh/actions/workflows/ci.yml/badge.svg)](https://github.com/Stoffberg/shrd.sh/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Share anything from your terminal. Instantly.**
+**Share anything from your terminal. Instantly. End-to-end encrypted.**
 
 ```bash
 echo "Hello, World!" | shrd
-# => https://shrd.stoff.dev/x7k2m
+# => https://shrd.stoff.dev/x7k2m#key=...
 
-shrd x7k2m
+shrd x7k2m#key=...
 # => Hello, World!
 ```
 
-No accounts. No config. Just pipe and go.
+No accounts. No config. Zero-knowledge encryption. Just pipe and go.
 
 ## Install
 
@@ -51,15 +51,12 @@ echo "secret" | shrd -x 1h
 
 # Burn after reading
 echo "password123" | shrd -b
-
-# End-to-end encrypt
-cat keys.txt | shrd -e
 ```
 
 **Retrieve content**
 ```bash
-shrd x7k2m              # by ID
-shrd x7k2m | jq .       # pipe to tools
+shrd x7k2m#key=...      # by ID (key in URL fragment)
+shrd x7k2m#key=... | jq # pipe to tools
 shrd x7k2m --meta       # view metadata
 ```
 
@@ -67,11 +64,21 @@ shrd x7k2m --meta       # view metadata
 |------|-------------|
 | `-x, --expire` | Expiry: `1h`, `24h`, `7d`, `30d`, `never` |
 | `-b, --burn` | Delete after first view |
-| `-e, --encrypt` | End-to-end encrypt |
 | `-n, --name` | Custom slug |
 | `-c, --clipboard` | Share clipboard contents |
 | `-j, --json` | JSON output |
 | `-q, --quiet` | Quiet mode |
+
+## Security
+
+All content is **end-to-end encrypted** using AES-256-GCM before leaving your machine.
+
+- Encryption key is generated locally and never sent to the server
+- Key is embedded in the URL fragment (`#key=...`) which browsers don't send to servers
+- The server stores only encrypted blobs - it cannot read your content
+- Even the operator cannot access your data
+
+This is a zero-knowledge architecture: your secrets stay secret.
 
 ## API
 
