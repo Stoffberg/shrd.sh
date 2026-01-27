@@ -16,6 +16,7 @@ export interface ContentMetadata {
   maxViews?: number
   filename?: string
   storageType: "kv" | "r2"
+  encrypted?: boolean
 }
 
 export interface StoredContent {
@@ -29,6 +30,7 @@ export interface PushRequest {
   filename?: string
   expiresIn?: number
   burn?: boolean
+  encrypted?: boolean
 }
 
 export interface PushResponse {
@@ -48,6 +50,7 @@ export interface MultipartUploadSession {
   filename?: string
   expiresIn?: number
   burn?: boolean
+  encrypted?: boolean
   parts: { partNumber: number; etag: string }[]
   createdAt: string
 }

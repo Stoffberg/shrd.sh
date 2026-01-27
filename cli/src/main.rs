@@ -110,6 +110,9 @@ struct Cli {
     #[arg(short, long, help = "Delete after first view")]
     burn: bool,
 
+    #[arg(short, long, help = "End-to-end encrypt (key in URL fragment)")]
+    encrypt: bool,
+
     #[arg(short, long, help = "Custom name/slug")]
     name: Option<String>,
 
@@ -167,6 +170,8 @@ struct PushRequest {
     content_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     filename: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    encrypted: bool,
 }
 
 fn guess_content_type(path: &str) -> String {
@@ -410,16 +415,22 @@ async fn push_content(
     let client = reqwest::Client::new();
     let base_url = get_base_url();
 
-    let (encrypted_content, encryption_key) = encrypt_content(content.as_bytes())?;
-    let encoded_content = base64::engine::general_purpose::STANDARD.encode(&encrypted_content);
+    let (final_content, encryption_key) = if cli.encrypt {
+        let (encrypted_content, key) = encrypt_content(content.as_bytes())?;
+        let encoded_content = base64::engine::general_purpose::STANDARD.encode(&encrypted_content);
+        (encoded_content, Some(key))
+    } else {
+        (content, None)
+    };
 
     let request = PushRequest {
-        content: encoded_content,
+        content: final_content,
         expire: cli.expire.clone(),
         burn: cli.burn,
         name: cli.name.clone(),
         content_type,
         filename,
+        encrypted: cli.encrypt,
     };
 
     let body_bytes = serde_json::to_vec(&request)?;
@@ -487,7 +498,7 @@ async fn push_content(
     }
 
     let result: PushResponse = response.json().await?;
-    print_result(cli, &result, &encryption_key);
+    print_result(cli, &result, encryption_key.as_deref());
 
     Ok(())
 }
@@ -516,15 +527,21 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
 
     let file_content = std::fs::read(path)
         .with_context(|| format!("Failed to read file: {}", path))?;
-    let (encrypted_content, encryption_key) = encrypt_content(&file_content)?;
-    let encrypted_size = encrypted_content.len() as u64;
+
+    let (upload_content, encryption_key, content_size) = if cli.encrypt {
+        let (encrypted, key) = encrypt_content(&file_content)?;
+        let size = encrypted.len() as u64;
+        (encrypted, Some(key), size)
+    } else {
+        (file_content, None, file_size)
+    };
 
     let upload_speed = get_upload_speed();
-    let estimated_seconds = encrypted_size as f64 / upload_speed;
+    let estimated_seconds = content_size as f64 / upload_speed;
     let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
 
     let progress_bar = if show_progress {
-        let pb = ProgressBar::new(encrypted_size);
+        let pb = ProgressBar::new(content_size);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
@@ -542,24 +559,27 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     let body = if let Some(ref pb) = progress_bar {
         let pb_clone = pb.clone();
         let chunk_size = 8192;
-        let chunks: Vec<Vec<u8>> = encrypted_content.chunks(chunk_size).map(|c| c.to_vec()).collect();
+        let chunks: Vec<Vec<u8>> = upload_content.chunks(chunk_size).map(|c| c.to_vec()).collect();
         let stream = stream::iter(chunks).map(move |chunk| {
             pb_clone.inc(chunk.len() as u64);
             Ok::<_, std::io::Error>(chunk)
         });
         Body::wrap_stream(stream)
     } else {
-        Body::from(encrypted_content)
+        Body::from(upload_content)
     };
 
     let mut req = client
         .post(format!("{}/api/v1/upload", base_url))
-        .header("Content-Length", encrypted_size.to_string())
+        .header("Content-Length", content_size.to_string())
         .header("X-Content-Type", &content_type)
         .header("X-Filename", filename);
 
     if cli.burn {
         req = req.header("X-Burn", "true");
+    }
+    if cli.encrypt {
+        req = req.header("X-Encrypted", "true");
     }
     if let Some(ref expire) = cli.expire {
         req = req.header("X-Expires-In", expire);
@@ -575,8 +595,8 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     }
 
     let elapsed = start_time.elapsed();
-    let actual_speed = encrypted_size as f64 / elapsed.as_secs_f64();
-    save_upload_speed(actual_speed, encrypted_size as usize);
+    let actual_speed = content_size as f64 / elapsed.as_secs_f64();
+    save_upload_speed(actual_speed, content_size as usize);
 
     if !response.status().is_success() {
         let status = response.status();
@@ -585,7 +605,7 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     }
 
     let result: PushResponse = response.json().await?;
-    print_result(cli, &result, &encryption_key);
+    print_result(cli, &result, encryption_key.as_deref());
     Ok(())
 }
 
@@ -596,7 +616,7 @@ struct MultipartInitResponse {
     upload_id: String,
 }
 
-async fn upload_file_multipart(cli: &Cli, path: &str, _file_size: u64) -> Result<()> {
+async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<()> {
     let path_obj = std::path::Path::new(path);
     let filename = path_obj
         .file_name()
@@ -609,8 +629,14 @@ async fn upload_file_multipart(cli: &Cli, path: &str, _file_size: u64) -> Result
 
     let file_content = std::fs::read(path)
         .with_context(|| format!("Failed to read file: {}", path))?;
-    let (encrypted_content, encryption_key) = encrypt_content(&file_content)?;
-    let encrypted_size = encrypted_content.len() as u64;
+
+    let (upload_content, encryption_key, content_size) = if cli.encrypt {
+        let (encrypted, key) = encrypt_content(&file_content)?;
+        let size = encrypted.len() as u64;
+        (encrypted, Some(key), size)
+    } else {
+        (file_content, None, file_size)
+    };
 
     let mut init_req = client
         .post(format!("{}/api/v1/multipart/init", base_url))
@@ -619,6 +645,9 @@ async fn upload_file_multipart(cli: &Cli, path: &str, _file_size: u64) -> Result
 
     if cli.burn {
         init_req = init_req.header("X-Burn", "true");
+    }
+    if cli.encrypt {
+        init_req = init_req.header("X-Encrypted", "true");
     }
     if let Some(ref expire) = cli.expire {
         init_req = init_req.header("X-Expires-In", expire);
@@ -632,11 +661,11 @@ async fn upload_file_multipart(cli: &Cli, path: &str, _file_size: u64) -> Result
     let init: MultipartInitResponse = init_response.json().await?;
 
     let upload_speed = get_upload_speed();
-    let estimated_seconds = encrypted_size as f64 / upload_speed;
+    let estimated_seconds = content_size as f64 / upload_speed;
     let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
 
     let progress_bar = if show_progress {
-        let pb = ProgressBar::new(encrypted_size);
+        let pb = ProgressBar::new(content_size);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
@@ -653,10 +682,10 @@ async fn upload_file_multipart(cli: &Cli, path: &str, _file_size: u64) -> Result
     let mut part_number = 1;
     let mut uploaded = 0u64;
 
-    while uploaded < encrypted_size {
-        let remaining = encrypted_size - uploaded;
+    while uploaded < content_size {
+        let remaining = content_size - uploaded;
         let part_size = std::cmp::min(PART_SIZE, remaining) as usize;
-        let part_data = encrypted_content[uploaded as usize..(uploaded as usize + part_size)].to_vec();
+        let part_data = upload_content[uploaded as usize..(uploaded as usize + part_size)].to_vec();
 
         let body = if let Some(ref pb) = progress_bar {
             let pb_clone = pb.clone();
@@ -692,7 +721,7 @@ async fn upload_file_multipart(cli: &Cli, path: &str, _file_size: u64) -> Result
     let complete_response = client
         .post(format!("{}/api/v1/multipart/{}/complete", base_url, init.id))
         .header("X-Upload-Id", &init.upload_id)
-        .header("X-Total-Size", encrypted_size.to_string())
+        .header("X-Total-Size", content_size.to_string())
         .send()
         .await?;
 
@@ -701,8 +730,8 @@ async fn upload_file_multipart(cli: &Cli, path: &str, _file_size: u64) -> Result
     }
 
     let elapsed = start_time.elapsed();
-    let actual_speed = encrypted_size as f64 / elapsed.as_secs_f64();
-    save_upload_speed(actual_speed, encrypted_size as usize);
+    let actual_speed = content_size as f64 / elapsed.as_secs_f64();
+    save_upload_speed(actual_speed, content_size as usize);
 
     if !complete_response.status().is_success() {
         let status = complete_response.status();
@@ -711,27 +740,32 @@ async fn upload_file_multipart(cli: &Cli, path: &str, _file_size: u64) -> Result
     }
 
     let result: PushResponse = complete_response.json().await?;
-    print_result(cli, &result, &encryption_key);
+    print_result(cli, &result, encryption_key.as_deref());
     Ok(())
 }
 
-fn print_result(cli: &Cli, result: &PushResponse, encryption_key: &str) {
-    let url_with_key = format!("{}#{}", result.url, encryption_key);
-    let raw_url_with_key = format!("{}#{}", result.raw_url, encryption_key);
+fn print_result(cli: &Cli, result: &PushResponse, encryption_key: Option<&str>) {
+    let (url, raw_url) = match encryption_key {
+        Some(key) => (
+            format!("{}#{}", result.url, key),
+            format!("{}#{}", result.raw_url, key),
+        ),
+        None => (result.url.clone(), result.raw_url.clone()),
+    };
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "id": result.id,
-            "url": url_with_key,
-            "rawUrl": raw_url_with_key,
+            "url": url,
+            "rawUrl": raw_url,
             "deleteUrl": result.delete_url,
             "expiresAt": result.expires_at,
             "deleteToken": result.delete_token,
         })).unwrap_or_default());
     } else if !cli.quiet {
-        println!("{} {}", "→".green(), url_with_key.cyan());
+        println!("{} {}", "→".green(), url.cyan());
         if !cli.no_copy {
-            if copy_to_clipboard(&url_with_key).is_ok() {
+            if copy_to_clipboard(&url).is_ok() {
                 eprintln!("{}", "(copied to clipboard)".dimmed());
             }
         }

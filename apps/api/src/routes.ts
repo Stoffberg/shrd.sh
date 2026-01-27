@@ -61,6 +61,7 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
       maxViews: body.burn ? 1 : undefined,
       filename: body.filename,
       storageType: "kv",
+      encrypted: body.encrypted,
     }
 
     const ctx = getExecutionContext(c)
@@ -140,6 +141,7 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
       expiresAt: metadata.expiresAt,
       views: metadata.views,
       filename: metadata.filename,
+      encrypted: metadata.encrypted,
     })
   })
 
@@ -148,6 +150,7 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
     const filename = c.req.header("X-Filename") ?? undefined
     const expiresIn = c.req.header("X-Expires-In")
     const burn = c.req.header("X-Burn") === "true"
+    const encrypted = c.req.header("X-Encrypted") === "true"
     const contentLength = c.req.header("Content-Length")
 
     if (!contentLength || parseInt(contentLength) === 0) {
@@ -180,6 +183,7 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
       maxViews: burn ? 1 : undefined,
       filename,
       storageType: "r2",
+      encrypted,
     }
 
     const stored = { metadata }
@@ -203,6 +207,7 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
     const filename = c.req.header("X-Filename") ?? undefined
     const expiresIn = c.req.header("X-Expires-In")
     const burn = c.req.header("X-Burn") === "true"
+    const encrypted = c.req.header("X-Encrypted") === "true"
 
     const id = generateId()
     const deleteToken = generateDeleteToken()
@@ -219,6 +224,7 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
       filename,
       expiresIn: expiresIn ? parseInt(expiresIn) : undefined,
       burn,
+      encrypted,
       parts: [],
       createdAt: new Date().toISOString(),
     }
@@ -303,6 +309,7 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
       maxViews: session.burn ? 1 : undefined,
       filename: session.filename,
       storageType: "r2",
+      encrypted: session.encrypted,
     }
 
     const stored = { metadata }
