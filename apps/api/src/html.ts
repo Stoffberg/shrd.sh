@@ -54,39 +54,432 @@ export function isBinaryContent(contentType: string): boolean {
   )
 }
 
-function renderStatusBadges(metadata: ContentMetadata): string {
-  const badges = [
-    metadata.name ? "named share" : "quick share",
-    metadata.encrypted ? "encrypted" : null,
-    metadata.maxViews !== undefined ? "view once" : null,
-    metadata.expiresAt ? `expires ${formatDate(metadata.expiresAt)}` : "permanent",
-  ].filter(Boolean)
-
-  return `<div class="badges">${badges
-    .map((badge) => `<span class="badge">${badge}</span>`)
-    .join("")}</div>`
+function hashStr(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h + s.charCodeAt(i)) | 0
+  }
+  return Math.abs(h)
 }
 
-function renderMetaLine(metadata: ContentMetadata): string {
-  const label = metadata.filename ?? metadata.name ?? metadata.id
-  const parts = [label, formatSize(metadata.size), metadata.expiresAt ? `expires ${formatDate(metadata.expiresAt)}` : "never expires"]
-  if (metadata.encrypted) {
-    parts.push("encrypted")
+function generateFavicon(id: string): string {
+  const h1 = hashStr(id) % 360
+  const h2 = hashStr(id.split("").reverse().join("")) % 360
+  const s1 = 50 + (hashStr(id + "a") % 25)
+  const s2 = 50 + (hashStr(id + "b") % 25)
+  const l1 = 40 + (hashStr(id + "c") % 18)
+  const l2 = 40 + (hashStr(id + "d") % 18)
+  const c1 = `hsl(${h1},${s1}%,${l1}%)`
+  const c2 = `hsl(${h2},${s2}%,${l2}%)`
+  const r = 6
+
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='32' y2='32' gradientUnits='userSpaceOnUse'><stop offset='0' stop-color='${c1}'/><stop offset='1' stop-color='${c2}'/></linearGradient></defs><rect width='32' height='32' rx='${r}' ry='${r}' fill='url(%23g)'/></svg>`
+
+  return `data:image/svg+xml,${svg.replace(/</g, "%3C").replace(/>/g, "%3E")}`
+}
+
+function faviconLink(id: string): string {
+  return `<link rel="icon" type="image/svg+xml" href="${generateFavicon(id)}">`
+}
+
+function fonts(): string {
+  return `<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-sans/style.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-mono/style.min.css">`
+}
+
+function baseStyles(): string {
+  return `
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { color-scheme: dark; }
+    body {
+      font-family: 'Geist', system-ui, -apple-system, sans-serif;
+      background: #09090b;
+      color: #e4e4e7;
+      min-height: 100vh;
+      padding: 0;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      position: relative;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.03;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+      background-repeat: repeat;
+      background-size: 256px 256px;
+    }
+    body > * { position: relative; z-index: 1; }
+    ::selection { background: rgba(34,211,238,0.2); }
+    .wrap {
+      max-width: 72rem;
+      margin: 0 auto;
+      padding: 1.5rem 1.25rem;
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+    .toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      min-width: 0;
+    }
+    .toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+    }
+    .toolbar h1 {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: #e4e4e7;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 500px;
+    }
+    .toolbar-tag {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+      color: #71717a;
+      background: #16161a;
+      border: 1px solid #161619;
+      border-radius: 4px;
+      padding: 0.125rem 0.5rem;
+    }
+    .toolbar-stat {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+      color: #52525b;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+      color: #a1a1aa;
+      background: #0f0f12;
+      border: 1px solid #1e1e24;
+      border-radius: 6px;
+      padding: 0.375rem 0.625rem;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { border-color: #52525b; color: #e4e4e7; background: #16161a; }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn svg { width: 12px; height: 12px; }
+    .btn.confirmed {
+      border-color: rgba(34,197,94,0.4);
+      color: #22c55e;
+      background: rgba(34,197,94,0.08);
+      pointer-events: none;
+    }
+    .meta-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 1rem;
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+      color: #52525b;
+      margin-bottom: 0.75rem;
+    }
+    .meta-bar .tag {
+      border: 1px solid #1e1e24;
+      background: #16161a;
+      border-radius: 999px;
+      padding: 0.125rem 0.5rem;
+      color: #a1a1aa;
+    }
+    .meta-bar .amber { color: #f59e0b; }
+    .warning {
+      background: rgba(245,158,11,0.08);
+      border: 1px solid rgba(245,158,11,0.2);
+      color: #f59e0b;
+      padding: 0.5rem 0.75rem;
+      border-radius: 6px;
+      margin-bottom: 0.75rem;
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+    }
+    .warning.last {
+      background: rgba(239,68,68,0.08);
+      border-color: rgba(239,68,68,0.2);
+      color: #ef4444;
+    }
+    .content-box {
+      background: #0f0f12;
+      border: 1px solid #1e1e24;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .content-box pre {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 13px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 1.25rem;
+      color: #d4d4d8;
+    }
+    .content-box.markdown {
+      padding: 1.25rem;
+      line-height: 1.7;
+      color: #d4d4d8;
+    }
+    .content-box.markdown h1, .content-box.markdown h2, .content-box.markdown h3 {
+      margin-top: 1.5rem;
+      margin-bottom: 0.75rem;
+      color: #e4e4e7;
+    }
+    .content-box.markdown h1:first-child, .content-box.markdown h2:first-child {
+      margin-top: 0;
+    }
+    .content-box.markdown p { margin-bottom: 1rem; }
+    .content-box.markdown code {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      background: #16161a;
+      padding: 0.15rem 0.35rem;
+      border-radius: 4px;
+      font-size: 0.875em;
+    }
+    .content-box.markdown pre {
+      background: #09090b;
+      padding: 1rem;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin: 1rem 0;
+    }
+    .content-box.markdown pre code {
+      background: none;
+      padding: 0;
+    }
+    .content-box.markdown ul, .content-box.markdown ol {
+      margin-left: 1.5rem;
+      margin-bottom: 1rem;
+    }
+    .content-box.markdown a { color: #22d3ee; }
+    .media {
+      max-width: 100%;
+      max-height: 80vh;
+      border-radius: 8px;
+      background: #0f0f12;
+    }
+    .media.pdf {
+      width: 100%;
+      height: 80vh;
+      border: 1px solid #1e1e24;
+    }
+    video, audio { width: 100%; }
+    .download-box {
+      background: #0f0f12;
+      border: 1px solid #1e1e24;
+      border-radius: 8px;
+      padding: 3rem;
+      text-align: center;
+    }
+    .download-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      background: #22d3ee;
+      color: #09090b;
+      padding: 0.75rem 1.5rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+      margin-bottom: 0.75rem;
+      cursor: pointer;
+      border: none;
+      transition: background 0.15s;
+    }
+    .download-btn:hover { background: #67e8f9; }
+    .download-btn:disabled { background: #16161a; color: #52525b; cursor: not-allowed; }
+    .file-info {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.75rem;
+      color: #52525b;
+    }
+    .kbd-bar {
+      margin-top: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.6875rem;
+      color: #3f3f46;
+    }
+    .kbd-bar kbd {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.25rem;
+      height: 1.25rem;
+      border: 1px solid #1e1e24;
+      border-radius: 4px;
+      background: #0f0f12;
+      font-size: 0.625rem;
+      color: #52525b;
+      margin-right: 0.25rem;
+    }
+    .error-box {
+      background: rgba(239,68,68,0.06);
+      border: 1px solid rgba(239,68,68,0.15);
+      border-radius: 8px;
+      padding: 3rem;
+      text-align: center;
+    }
+    .error-box h2 {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      color: #ef4444;
+      font-size: 1rem;
+      margin-bottom: 0.75rem;
+    }
+    .error-box p {
+      font-size: 0.875rem;
+      color: #71717a;
+    }
+    .loading-box {
+      background: #0f0f12;
+      border: 1px solid #1e1e24;
+      border-radius: 8px;
+      padding: 3rem;
+      text-align: center;
+    }
+    .loading-box p {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.75rem;
+      color: #52525b;
+    }
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 2px solid #1e1e24;
+      border-top-color: #22d3ee;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 0.75rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #content { display: none; }
+    #loading { display: block; }
+    #error { display: none; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(113,113,122,0.3); }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(113,113,122,0.5); }
+  `
+}
+
+function iconCopy(): string {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`
+}
+
+function iconDownload(): string {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`
+}
+
+function iconRaw(): string {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`
+}
+
+function iconCheck(): string {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`
+}
+
+function renderMetaBar(metadata: ContentMetadata): string {
+  const parts: string[] = []
+  if (metadata.views > 0) {
+    parts.push(`<span>${metadata.views} ${metadata.views === 1 ? "view" : "views"}</span>`)
   }
-  if (metadata.maxViews !== undefined) {
-    parts.push("view once")
+  parts.push(`<span>${formatSize(metadata.size)}</span>`)
+  if (metadata.expiresAt) {
+    const isExpiringSoon = new Date(metadata.expiresAt).getTime() - Date.now() < 3600000
+    parts.push(`<span${isExpiringSoon ? ' class="amber"' : ''}>expires ${formatDate(metadata.expiresAt)}</span>`)
   }
-  return parts.join(" · ")
+  if (metadata.encrypted) parts.push(`<span class="tag">encrypted</span>`)
+  if (metadata.maxViews !== undefined) parts.push(`<span class="tag">view once</span>`)
+  return `<div class="meta-bar">${parts.join("")}</div>`
+}
+
+function renderBurnWarning(isBurn: boolean, viewsLeft: number | null, isLastView: boolean): string {
+  if (!isBurn) return ""
+  return `<div class="warning${isLastView ? ' last' : ''}">
+    ${isLastView
+      ? 'This content will be deleted after you leave this page.'
+      : `This content will be deleted after ${viewsLeft} more view${viewsLeft === 1 ? '' : 's'}.`}
+  </div>`
+}
+
+function renderKbdBar(keys: { key: string; label: string }[]): string {
+  return `<div class="kbd-bar">${keys.map(k => `<span><kbd>${k.key}</kbd>${k.label}</span>`).join("")}</div>`
+}
+
+function confirmBtnScript(): string {
+  return `
+    var _checkSvg = '${iconCheck()}';
+    function confirmBtn(btn, originalHtml) {
+      btn.classList.add('confirmed');
+      btn.innerHTML = _checkSvg + ' Copied';
+      setTimeout(function() {
+        btn.classList.remove('confirmed');
+        btn.innerHTML = originalHtml;
+      }, 1500);
+    }
+  `
+}
+
+function copyUrlScript(): string {
+  return `
+    function copyUrl(e) {
+      var btn = e && e.currentTarget ? e.currentTarget : null;
+      navigator.clipboard.writeText(window.location.href);
+      if (btn) confirmBtn(btn, btn.dataset.original);
+    }
+  `
+}
+
+function kbdScript(hasContent: boolean): string {
+  return `
+    document.addEventListener('keydown', function(e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 'c') {
+        ${hasContent
+          ? "var btn = document.getElementById('copy-btn') || document.getElementById('copy-content-btn'); if (typeof copyContent === 'function') copyContent({ currentTarget: btn });"
+          : "var btns = document.querySelectorAll('.btn[data-original]'); if (btns[0]) copyUrl({ currentTarget: btns[0] });"}
+      }
+      if (e.key === 'r' && typeof openRaw === 'function') { openRaw(); }
+      if (e.key === 'd' && typeof downloadFile === 'function') { downloadFile(); }
+    });
+  `
 }
 
 export function renderBinaryPage(metadata: ContentMetadata, baseUrl: string): string {
   const isBurn = metadata.maxViews !== undefined
   const viewsLeft = isBurn ? metadata.maxViews! - metadata.views - 1 : null
   const isLastView = viewsLeft === 0
-  const shareUrl = `${baseUrl}/${metadata.id}`
   const rawUrl = `${baseUrl}/${metadata.id}/raw`
   const contentType = metadata.contentType
   const isEncrypted = metadata.encrypted === true
+  const label = metadata.filename ?? metadata.name ?? metadata.id
 
   if (isEncrypted) {
     return renderEncryptedBinaryPage(metadata, baseUrl, rawUrl, isBurn, viewsLeft, isLastView)
@@ -98,166 +491,47 @@ export function renderBinaryPage(metadata: ContentMetadata, baseUrl: string): st
   } else if (contentType.startsWith("audio/")) {
     mediaElement = `<audio controls class="media"><source src="${rawUrl}" type="${contentType}">Your browser does not support audio.</audio>`
   } else if (contentType.startsWith("image/")) {
-    mediaElement = `<img src="${rawUrl}" class="media" alt="${metadata.filename || 'image'}">`
+    mediaElement = `<img src="${rawUrl}" class="media" alt="${escapeHtml(metadata.filename || 'image')}">`
   } else if (contentType === "application/pdf") {
     mediaElement = `<iframe src="${rawUrl}" class="media pdf"></iframe>`
   } else {
-    mediaElement = `<div class="download-box"><a href="${rawUrl}" download="${metadata.filename || metadata.id}" class="download-btn">Download File</a><p class="file-info">${metadata.filename || 'file'} · ${formatSize(metadata.size)}</p></div>`
+    mediaElement = `<div class="download-box"><a href="${rawUrl}" download="${escapeHtml(metadata.filename || metadata.id)}" class="download-btn">${iconDownload()} Download File</a><p class="file-info">${escapeHtml(metadata.filename || 'file')} &middot; ${formatSize(metadata.size)}</p></div>`
   }
+
+  const copyLinkHtml = `${iconCopy()} Copy Link`
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${metadata.filename || metadata.id}</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #0a0a0a;
-      color: #e5e5e5;
-      min-height: 100vh;
-      padding: 2rem;
-    }
-    .container { max-width: 1200px; margin: 0 auto; }
-    .header {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-      padding-bottom: 1rem;
-      border-bottom: 1px solid #262626;
-    }
-    .url {
-      font-family: monospace;
-      font-size: 0.875rem;
-      color: #737373;
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .btn {
-      background: #262626;
-      border: 1px solid #404040;
-      color: #e5e5e5;
-      padding: 0.5rem 1rem;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 0.875rem;
-      text-decoration: none;
-      transition: background 0.15s;
-      white-space: nowrap;
-    }
-    .btn:hover { background: #333; }
-    .warning {
-      background: #451a03;
-      border: 1px solid #92400e;
-      color: #fbbf24;
-      padding: 0.75rem 1rem;
-      border-radius: 6px;
-      margin-bottom: 1.5rem;
-      font-size: 0.875rem;
-    }
-    .warning.last {
-      background: #450a0a;
-      border-color: #991b1b;
-      color: #f87171;
-    }
-    .badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      margin-bottom: 1rem;
-    }
-    .badge {
-      border: 1px solid #404040;
-      border-radius: 999px;
-      background: #171717;
-      color: #d4d4d4;
-      font-size: 0.75rem;
-      padding: 0.25rem 0.65rem;
-    }
-    .media {
-      max-width: 100%;
-      max-height: 80vh;
-      border-radius: 8px;
-      background: #171717;
-    }
-    .media.pdf {
-      width: 100%;
-      height: 80vh;
-      border: 1px solid #262626;
-    }
-    video, audio { width: 100%; }
-    .download-box {
-      background: #171717;
-      border: 1px solid #262626;
-      border-radius: 8px;
-      padding: 3rem;
-      text-align: center;
-    }
-    .download-btn {
-      display: inline-block;
-      background: #2563eb;
-      color: white;
-      padding: 1rem 2rem;
-      border-radius: 8px;
-      text-decoration: none;
-      font-size: 1.1rem;
-      margin-bottom: 1rem;
-    }
-    .download-btn:hover { background: #1d4ed8; }
-    .file-info { color: #737373; }
-    .meta {
-      margin-top: 1rem;
-      font-size: 0.75rem;
-      color: #525252;
-    }
-    .copied {
-      position: fixed;
-      bottom: 2rem;
-      left: 50%;
-      transform: translateX(-50%);
-      background: #166534;
-      color: #fff;
-      padding: 0.75rem 1.5rem;
-      border-radius: 6px;
-      opacity: 0;
-      transition: opacity 0.2s;
-    }
-    .copied.show { opacity: 1; }
-  </style>
+  <meta name="theme-color" content="#09090b">
+  <title>${escapeHtml(label)} - shrd.sh</title>
+  ${faviconLink(metadata.id)}
+  ${fonts()}
+  <style>${baseStyles()}</style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <span class="url">${shareUrl}</span>
-      <button class="btn" onclick="copyUrl()">Copy Link</button>
-      <a href="${rawUrl}" download class="btn">Download</a>
+  <div class="wrap">
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <h1>${escapeHtml(label)}</h1>
+        <span class="toolbar-stat">${formatSize(metadata.size)}</span>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn" data-original="${escapeHtml(copyLinkHtml)}" onclick="copyUrl(event)">${copyLinkHtml}</button>
+        <a href="${rawUrl}" download class="btn">${iconDownload()} Download</a>
+      </div>
     </div>
-    ${renderStatusBadges(metadata)}
-    ${isBurn ? `
-    <div class="warning${isLastView ? ' last' : ''}">
-      ${isLastView 
-        ? 'This content will be deleted after you leave this page.' 
-        : `This content will be deleted after ${viewsLeft} more view${viewsLeft === 1 ? '' : 's'}.`}
-    </div>
-    ` : ''}
+    ${renderMetaBar(metadata)}
+    ${renderBurnWarning(isBurn, viewsLeft, isLastView)}
     ${mediaElement}
-    <div class="meta">
-      ${renderMetaLine(metadata)}
-    </div>
   </div>
-  <div class="copied" id="copied">Copied!</div>
   <script>
-    function copyUrl() {
-      navigator.clipboard.writeText(window.location.href);
-      const el = document.getElementById('copied');
-      el.classList.add('show');
-      setTimeout(() => el.classList.remove('show'), 1500);
-    }
+    ${confirmBtnScript()}
+    ${copyUrlScript()}
+    function downloadFile() { window.location.href = '${rawUrl}'; }
+    ${kbdScript(false)}
   </script>
 </body>
 </html>`
@@ -273,234 +547,87 @@ function renderEncryptedBinaryPage(
 ): string {
   const contentType = metadata.contentType
   const filename = metadata.filename || metadata.id
+  const label = metadata.filename ?? metadata.name ?? metadata.id
+
+  const copyLinkHtml = `${iconCopy()} Copy Link`
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${metadata.filename || metadata.id} (Encrypted)</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #0a0a0a;
-      color: #e5e5e5;
-      min-height: 100vh;
-      padding: 2rem;
-    }
-    .container { max-width: 1200px; margin: 0 auto; }
-    .header {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-      padding-bottom: 1rem;
-      border-bottom: 1px solid #262626;
-    }
-    .url {
-      font-family: monospace;
-      font-size: 0.875rem;
-      color: #737373;
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .btn {
-      background: #262626;
-      border: 1px solid #404040;
-      color: #e5e5e5;
-      padding: 0.5rem 1rem;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 0.875rem;
-      text-decoration: none;
-      transition: background 0.15s;
-      white-space: nowrap;
-    }
-    .btn:hover { background: #333; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .warning {
-      background: #451a03;
-      border: 1px solid #92400e;
-      color: #fbbf24;
-      padding: 0.75rem 1rem;
-      border-radius: 6px;
-      margin-bottom: 1.5rem;
-      font-size: 0.875rem;
-    }
-    .warning.last {
-      background: #450a0a;
-      border-color: #991b1b;
-      color: #f87171;
-    }
-    .badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      margin-bottom: 1rem;
-    }
-    .badge {
-      border: 1px solid #404040;
-      border-radius: 999px;
-      background: #171717;
-      color: #d4d4d4;
-      font-size: 0.75rem;
-      padding: 0.25rem 0.65rem;
-    }
-    .media {
-      max-width: 100%;
-      max-height: 80vh;
-      border-radius: 8px;
-      background: #171717;
-    }
-    .media.pdf {
-      width: 100%;
-      height: 80vh;
-      border: 1px solid #262626;
-    }
-    video, audio { width: 100%; }
-    .download-box {
-      background: #171717;
-      border: 1px solid #262626;
-      border-radius: 8px;
-      padding: 3rem;
-      text-align: center;
-    }
-    .download-btn {
-      display: inline-block;
-      background: #2563eb;
-      color: white;
-      padding: 1rem 2rem;
-      border-radius: 8px;
-      text-decoration: none;
-      font-size: 1.1rem;
-      margin-bottom: 1rem;
-      cursor: pointer;
-      border: none;
-    }
-    .download-btn:hover { background: #1d4ed8; }
-    .download-btn:disabled { background: #374151; cursor: not-allowed; }
-    .file-info { color: #737373; }
-    .meta {
-      margin-top: 1rem;
-      font-size: 0.75rem;
-      color: #525252;
-    }
-    .copied {
-      position: fixed;
-      bottom: 2rem;
-      left: 50%;
-      transform: translateX(-50%);
-      background: #166534;
-      color: #fff;
-      padding: 0.75rem 1.5rem;
-      border-radius: 6px;
-      opacity: 0;
-      transition: opacity 0.2s;
-    }
-    .copied.show { opacity: 1; }
-    .error-box {
-      background: #450a0a;
-      border: 1px solid #991b1b;
-      border-radius: 8px;
-      padding: 3rem;
-      text-align: center;
-    }
-    .error-box h2 { color: #f87171; margin-bottom: 1rem; }
-    .error-box p { color: #fca5a5; }
-    .loading-box {
-      background: #171717;
-      border: 1px solid #262626;
-      border-radius: 8px;
-      padding: 3rem;
-      text-align: center;
-    }
-    .spinner {
-      width: 40px;
-      height: 40px;
-      border: 3px solid #262626;
-      border-top-color: #2563eb;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-      margin: 0 auto 1rem;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #content { display: none; }
-    #loading { display: block; }
-    #error { display: none; }
-  </style>
+  <meta name="theme-color" content="#09090b">
+  <title>${escapeHtml(label)} - shrd.sh</title>
+  ${faviconLink(metadata.id)}
+  ${fonts()}
+  <style>${baseStyles()}</style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <span class="url">${baseUrl}/${metadata.id}#key=...</span>
-      <button class="btn" onclick="copyUrl()">Copy Link</button>
-      <button class="btn" id="download-header-btn" onclick="downloadFile()" disabled>Download</button>
+  <div class="wrap">
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <h1>${escapeHtml(label)}</h1>
+        <span class="toolbar-tag">encrypted</span>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn" data-original="${escapeHtml(copyLinkHtml)}" onclick="copyUrl(event)">${copyLinkHtml}</button>
+        <button class="btn" id="download-header-btn" onclick="downloadFile()" disabled>${iconDownload()} Download</button>
+      </div>
     </div>
-    ${renderStatusBadges(metadata)}
-    ${isBurn ? `
-    <div class="warning${isLastView ? ' last' : ''}">
-      ${isLastView 
-        ? 'This content will be deleted after you leave this page.' 
-        : `This content will be deleted after ${viewsLeft} more view${viewsLeft === 1 ? '' : 's'}.`}
-    </div>
-    ` : ''}
+    ${renderMetaBar(metadata)}
+    ${renderBurnWarning(isBurn, viewsLeft, isLastView)}
     <div id="loading" class="loading-box">
       <div class="spinner"></div>
-      <p>Decrypting content...</p>
+      <p>Decrypting...</p>
     </div>
     <div id="error" class="error-box">
-      <h2>Decryption Failed</h2>
+      <h2>Decryption failed</h2>
       <p id="error-message">The decryption key is missing or invalid.</p>
     </div>
     <div id="content"></div>
-    <div class="meta">
-      ${renderMetaLine(metadata)}
-    </div>
   </div>
-  <div class="copied" id="copied">Copied!</div>
   <script>
     ${getDecryptionScript()}
-    
-    const rawUrl = '${rawUrl}';
-    const contentType = '${contentType}';
-    const filename = '${filename}';
-    const storageType = '${metadata.storageType}';
-    let decryptedBlob = null;
+    ${confirmBtnScript()}
+    ${copyUrlScript()}
+
+    var rawUrl = '${rawUrl}';
+    var contentType = '${contentType}';
+    var filename = '${escapeHtml(filename)}';
+    var storageType = '${metadata.storageType}';
+    var decryptedBlob = null;
 
     async function init() {
-      const key = getKeyFromHash();
+      var key = getKeyFromHash();
       if (!key) {
         showError('No decryption key found in URL. The key should be in the URL fragment (after #).');
         return;
       }
 
       try {
-        const response = await fetch(rawUrl);
+        var response = await fetch(rawUrl);
         if (!response.ok) throw new Error('Failed to fetch content');
-        let ciphertext = new Uint8Array(await response.arrayBuffer());
+        var ciphertext = new Uint8Array(await response.arrayBuffer());
         if (storageType === 'kv') {
           ciphertext = base64ToBytes(ciphertext);
         }
-        const decrypted = await decryptContent(ciphertext, key);
+        var decrypted = await decryptContent(ciphertext, key);
         decryptedBlob = new Blob([decrypted], { type: contentType });
-        
+
         document.getElementById('loading').style.display = 'none';
         document.getElementById('content').style.display = 'block';
         document.getElementById('download-header-btn').disabled = false;
-        
-        const blobUrl = URL.createObjectURL(decryptedBlob);
-        
+
+        var blobUrl = URL.createObjectURL(decryptedBlob);
+
         if (contentType.startsWith('video/')) {
-          document.getElementById('content').innerHTML = '<video controls autoplay class="media"><source src="' + blobUrl + '" type="' + contentType + '">Your browser does not support video.</video>';
+          document.getElementById('content').innerHTML = '<video controls autoplay class="media"><source src="' + blobUrl + '" type="' + contentType + '"></video>';
         } else if (contentType.startsWith('audio/')) {
-          document.getElementById('content').innerHTML = '<audio controls class="media"><source src="' + blobUrl + '" type="' + contentType + '">Your browser does not support audio.</audio>';
+          document.getElementById('content').innerHTML = '<audio controls class="media"><source src="' + blobUrl + '" type="' + contentType + '"></audio>';
         } else if (contentType.startsWith('image/')) {
           document.getElementById('content').innerHTML = '<img src="' + blobUrl + '" class="media" alt="' + filename + '">';
         } else {
-          document.getElementById('content').innerHTML = '<div class="download-box"><button onclick="downloadFile()" class="download-btn">Download File</button><p class="file-info">' + filename + '</p></div>';
+          document.getElementById('content').innerHTML = '<div class="download-box"><button onclick="downloadFile()" class="download-btn">${iconDownload()} Download File</button><p class="file-info">' + filename + '</p></div>';
         }
       } catch (e) {
         showError('Failed to decrypt: ' + (e.message || 'Invalid key or corrupted data'));
@@ -509,21 +636,15 @@ function renderEncryptedBinaryPage(
 
     function downloadFile() {
       if (!decryptedBlob) return;
-      const url = URL.createObjectURL(decryptedBlob);
-      const a = document.createElement('a');
+      var url = URL.createObjectURL(decryptedBlob);
+      var a = document.createElement('a');
       a.href = url;
       a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
     }
 
-    function copyUrl() {
-      navigator.clipboard.writeText(window.location.href);
-      const el = document.getElementById('copied');
-      el.classList.add('show');
-      setTimeout(() => el.classList.remove('show'), 1500);
-    }
-
+    ${kbdScript(false)}
     init();
   </script>
 </body>
@@ -534,219 +655,96 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
   const isBurn = metadata.maxViews !== undefined
   const viewsLeft = isBurn ? metadata.maxViews! - metadata.views - 1 : null
   const isLastView = viewsLeft === 0
-  const shareUrl = `${baseUrl}/${metadata.id}`
   const rawUrl = `${baseUrl}/${metadata.id}/raw`
   const isEncrypted = metadata.encrypted === true
+  const label = metadata.filename ?? metadata.name ?? metadata.id
+  const lineCount = content.split("\n").length
 
   if (isEncrypted) {
     return renderEncryptedContentPage(metadata, baseUrl, rawUrl, isBurn, viewsLeft, isLastView)
   }
 
   const escaped = escapeHtml(content)
-  
+
+  const copyHtml = `${iconCopy()} Copy`
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${metadata.filename || metadata.id}</title>
+  <meta name="theme-color" content="#09090b">
+  <title>${escapeHtml(label)} - shrd.sh</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #0a0a0a;
-      color: #e5e5e5;
-      min-height: 100vh;
-      padding: 2rem;
-    }
-    .container { max-width: 900px; margin: 0 auto; }
-    .header {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-      padding-bottom: 1rem;
-      border-bottom: 1px solid #262626;
-    }
-    .url {
-      font-family: monospace;
-      font-size: 0.875rem;
-      color: #737373;
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .btn {
-      background: #262626;
-      border: 1px solid #404040;
-      color: #e5e5e5;
-      padding: 0.5rem 1rem;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 0.875rem;
-      transition: background 0.15s;
-      white-space: nowrap;
-    }
-    .btn:hover { background: #333; }
-    .btn:active { background: #404040; }
-    .warning {
-      background: #451a03;
-      border: 1px solid #92400e;
-      color: #fbbf24;
-      padding: 0.75rem 1rem;
-      border-radius: 6px;
-      margin-bottom: 1.5rem;
-      font-size: 0.875rem;
-    }
-    .warning.last {
-      background: #450a0a;
-      border-color: #991b1b;
-      color: #f87171;
-    }
-    .badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      margin-bottom: 1rem;
-    }
-    .badge {
-      border: 1px solid #404040;
-      border-radius: 999px;
-      background: #171717;
-      color: #d4d4d4;
-      font-size: 0.75rem;
-      padding: 0.25rem 0.65rem;
-    }
-    .content {
-      background: #171717;
-      border: 1px solid #262626;
-      border-radius: 8px;
-      padding: 1.5rem;
-      overflow-x: auto;
-    }
-    .content pre {
-      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-      font-size: 0.875rem;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .content.markdown {
-      line-height: 1.7;
-    }
-    .content.markdown h1, .content.markdown h2, .content.markdown h3 {
-      margin-top: 1.5rem;
-      margin-bottom: 0.75rem;
-      color: #fff;
-    }
-    .content.markdown h1:first-child, .content.markdown h2:first-child {
-      margin-top: 0;
-    }
-    .content.markdown p { margin-bottom: 1rem; }
-    .content.markdown code {
-      background: #262626;
-      padding: 0.2rem 0.4rem;
-      border-radius: 4px;
-      font-size: 0.875em;
-    }
-    .content.markdown pre {
-      background: #0a0a0a;
-      padding: 1rem;
-      border-radius: 6px;
-      overflow-x: auto;
-      margin: 1rem 0;
-    }
-    .content.markdown pre code {
-      background: none;
-      padding: 0;
-    }
-    .content.markdown ul, .content.markdown ol {
-      margin-left: 1.5rem;
-      margin-bottom: 1rem;
-    }
-    .content.markdown a { color: #60a5fa; }
-    .meta {
-      margin-top: 1rem;
-      font-size: 0.75rem;
-      color: #525252;
-    }
-    .copied {
-      position: fixed;
-      bottom: 2rem;
-      left: 50%;
-      transform: translateX(-50%);
-      background: #166534;
-      color: #fff;
-      padding: 0.75rem 1.5rem;
-      border-radius: 6px;
-      opacity: 0;
-      transition: opacity 0.2s;
-    }
-    .copied.show { opacity: 1; }
-  </style>
+  ${faviconLink(metadata.id)}
+  ${fonts()}
+  <style>${baseStyles()}</style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <span class="url">${shareUrl}</span>
-      <button class="btn" onclick="copyUrl()">Copy Link</button>
-      <a href="${rawUrl}" class="btn">Raw</a>
-      <button class="btn" onclick="copyContent()">Copy Content</button>
+  <div class="wrap">
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <h1>${escapeHtml(label)}</h1>
+        <span class="toolbar-stat">${lineCount} ${lineCount === 1 ? "line" : "lines"}</span>
+        <span class="toolbar-stat">${formatSize(metadata.size)}</span>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn" id="copy-btn" data-original="${escapeHtml(copyHtml)}" onclick="copyContent(event)">${copyHtml}</button>
+        <a href="${rawUrl}" class="btn" onclick="event.preventDefault(); openRaw()">${iconRaw()} Raw</a>
+        <button class="btn" onclick="downloadFile()">${iconDownload()} Download</button>
+      </div>
     </div>
-    ${renderStatusBadges(metadata)}
-    ${isBurn ? `
-    <div class="warning${isLastView ? ' last' : ''}">
-      ${isLastView 
-        ? 'This content will be deleted after you leave this page.' 
-        : `This content will be deleted after ${viewsLeft} more view${viewsLeft === 1 ? '' : 's'}.`}
-    </div>
-    ` : ''}
-    <div class="content" id="content"><pre>${escaped}</pre></div>
-    <div class="meta">
-      ${renderMetaLine(metadata)}
-    </div>
+    ${renderMetaBar(metadata)}
+    ${renderBurnWarning(isBurn, viewsLeft, isLastView)}
+    <div class="content-box" id="content"><pre>${escaped}</pre></div>
+    ${renderKbdBar([{ key: "c", label: "copy" }, { key: "d", label: "download" }, { key: "r", label: "raw" }])}
   </div>
-  <div class="copied" id="copied">Copied!</div>
   <script>
-    const raw = ${JSON.stringify(content)};
-    const contentEl = document.getElementById('content');
-    
+    var raw = ${JSON.stringify(content)};
+    var contentEl = document.getElementById('content');
+    ${confirmBtnScript()}
+    ${copyUrlScript()}
+
     if (looksLikeMarkdown(raw)) {
       contentEl.classList.add('markdown');
       contentEl.innerHTML = marked.parse(raw);
     } else {
       contentEl.innerHTML = '<pre>' + linkify(escapeHtml(raw)) + '</pre>';
     }
-    
+
     function looksLikeMarkdown(text) {
       return /^#{1,6}\\s|\\*\\*|__|\\[.+\\]\\(|^\\s*[-*+]\\s|^\\s*\\d+\\.\\s|^\`\`\`/m.test(text);
     }
-    
+
     function escapeHtml(text) {
       return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
-    
+
     function linkify(text) {
-      return text.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+      return text.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" target="_blank" rel="noopener" style="color:#22d3ee">$1</a>');
     }
-    
-    function copyUrl() {
-      navigator.clipboard.writeText(window.location.href);
-      showCopied();
-    }
-    
-    function copyContent() {
+
+    function copyContent(e) {
       navigator.clipboard.writeText(raw);
-      showCopied();
+      var btn = e && e.currentTarget ? e.currentTarget : document.getElementById('copy-btn');
+      if (btn) confirmBtn(btn, btn.dataset.original);
     }
-    
-    function showCopied() {
-      const el = document.getElementById('copied');
-      el.classList.add('show');
-      setTimeout(() => el.classList.remove('show'), 1500);
+
+    function openRaw() {
+      window.open('${rawUrl}', '_blank');
     }
+
+    function downloadFile() {
+      var blob = new Blob([raw], { type: 'text/plain' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = '${escapeHtml(metadata.filename || metadata.id + ".txt")}';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    ${kbdScript(true)}
   </script>
 </body>
 </html>`
@@ -760,237 +758,79 @@ function renderEncryptedContentPage(
   viewsLeft: number | null,
   isLastView: boolean
 ): string {
+  const label = metadata.filename ?? metadata.name ?? metadata.id
+
+  const copyLinkHtml = `${iconCopy()} Copy Link`
+  const copyHtml = `${iconCopy()} Copy`
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${metadata.filename || metadata.id} (Encrypted)</title>
+  <meta name="theme-color" content="#09090b">
+  <title>${escapeHtml(label)} - shrd.sh</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #0a0a0a;
-      color: #e5e5e5;
-      min-height: 100vh;
-      padding: 2rem;
-    }
-    .container { max-width: 900px; margin: 0 auto; }
-    .header {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-      padding-bottom: 1rem;
-      border-bottom: 1px solid #262626;
-    }
-    .url {
-      font-family: monospace;
-      font-size: 0.875rem;
-      color: #737373;
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .btn {
-      background: #262626;
-      border: 1px solid #404040;
-      color: #e5e5e5;
-      padding: 0.5rem 1rem;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 0.875rem;
-      transition: background 0.15s;
-      white-space: nowrap;
-    }
-    .btn:hover { background: #333; }
-    .btn:active { background: #404040; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .warning {
-      background: #451a03;
-      border: 1px solid #92400e;
-      color: #fbbf24;
-      padding: 0.75rem 1rem;
-      border-radius: 6px;
-      margin-bottom: 1.5rem;
-      font-size: 0.875rem;
-    }
-    .warning.last {
-      background: #450a0a;
-      border-color: #991b1b;
-      color: #f87171;
-    }
-    .badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      margin-bottom: 1rem;
-    }
-    .badge {
-      border: 1px solid #404040;
-      border-radius: 999px;
-      background: #171717;
-      color: #d4d4d4;
-      font-size: 0.75rem;
-      padding: 0.25rem 0.65rem;
-    }
-    .content {
-      background: #171717;
-      border: 1px solid #262626;
-      border-radius: 8px;
-      padding: 1.5rem;
-      overflow-x: auto;
-    }
-    .content pre {
-      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-      font-size: 0.875rem;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .content.markdown {
-      line-height: 1.7;
-    }
-    .content.markdown h1, .content.markdown h2, .content.markdown h3 {
-      margin-top: 1.5rem;
-      margin-bottom: 0.75rem;
-      color: #fff;
-    }
-    .content.markdown h1:first-child, .content.markdown h2:first-child {
-      margin-top: 0;
-    }
-    .content.markdown p { margin-bottom: 1rem; }
-    .content.markdown code {
-      background: #262626;
-      padding: 0.2rem 0.4rem;
-      border-radius: 4px;
-      font-size: 0.875em;
-    }
-    .content.markdown pre {
-      background: #0a0a0a;
-      padding: 1rem;
-      border-radius: 6px;
-      overflow-x: auto;
-      margin: 1rem 0;
-    }
-    .content.markdown pre code {
-      background: none;
-      padding: 0;
-    }
-    .content.markdown ul, .content.markdown ol {
-      margin-left: 1.5rem;
-      margin-bottom: 1rem;
-    }
-    .content.markdown a { color: #60a5fa; }
-    .meta {
-      margin-top: 1rem;
-      font-size: 0.75rem;
-      color: #525252;
-    }
-    .copied {
-      position: fixed;
-      bottom: 2rem;
-      left: 50%;
-      transform: translateX(-50%);
-      background: #166534;
-      color: #fff;
-      padding: 0.75rem 1.5rem;
-      border-radius: 6px;
-      opacity: 0;
-      transition: opacity 0.2s;
-    }
-    .copied.show { opacity: 1; }
-    .error-box {
-      background: #450a0a;
-      border: 1px solid #991b1b;
-      border-radius: 8px;
-      padding: 3rem;
-      text-align: center;
-    }
-    .error-box h2 { color: #f87171; margin-bottom: 1rem; }
-    .error-box p { color: #fca5a5; }
-    .loading-box {
-      background: #171717;
-      border: 1px solid #262626;
-      border-radius: 8px;
-      padding: 3rem;
-      text-align: center;
-    }
-    .spinner {
-      width: 40px;
-      height: 40px;
-      border: 3px solid #262626;
-      border-top-color: #2563eb;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-      margin: 0 auto 1rem;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #content { display: none; }
-    #loading { display: block; }
-    #error { display: none; }
-  </style>
+  ${faviconLink(metadata.id)}
+  ${fonts()}
+  <style>${baseStyles()}</style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <span class="url">${baseUrl}/${metadata.id}#key=...</span>
-      <button class="btn" onclick="copyUrl()">Copy Link</button>
-      <button class="btn" id="copy-content-btn" onclick="copyContent()" disabled>Copy Content</button>
+  <div class="wrap">
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <h1>${escapeHtml(label)}</h1>
+        <span class="toolbar-tag">encrypted</span>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn" data-original="${escapeHtml(copyLinkHtml)}" onclick="copyUrl(event)">${copyLinkHtml}</button>
+        <button class="btn" id="copy-content-btn" data-original="${escapeHtml(copyHtml)}" onclick="copyContent(event)" disabled>${copyHtml}</button>
+      </div>
     </div>
-    ${renderStatusBadges(metadata)}
-    ${isBurn ? `
-    <div class="warning${isLastView ? ' last' : ''}">
-      ${isLastView 
-        ? 'This content will be deleted after you leave this page.' 
-        : `This content will be deleted after ${viewsLeft} more view${viewsLeft === 1 ? '' : 's'}.`}
-    </div>
-    ` : ''}
+    ${renderMetaBar(metadata)}
+    ${renderBurnWarning(isBurn, viewsLeft, isLastView)}
     <div id="loading" class="loading-box">
       <div class="spinner"></div>
-      <p>Decrypting content...</p>
+      <p>Decrypting...</p>
     </div>
     <div id="error" class="error-box">
-      <h2>Decryption Failed</h2>
+      <h2>Decryption failed</h2>
       <p id="error-message">The decryption key is missing or invalid.</p>
     </div>
-    <div class="content" id="content"></div>
-    <div class="meta">
-      ${renderMetaLine(metadata)}
-    </div>
+    <div class="content-box" id="content"></div>
+    ${renderKbdBar([{ key: "c", label: "copy" }])}
   </div>
-  <div class="copied" id="copied">Copied!</div>
   <script>
     ${getDecryptionScript()}
-    
-    const rawUrl = '${rawUrl}';
-    const storageType = '${metadata.storageType}';
-    let decryptedText = null;
+    ${confirmBtnScript()}
+    ${copyUrlScript()}
+
+    var rawUrl = '${rawUrl}';
+    var storageType = '${metadata.storageType}';
+    var decryptedText = null;
 
     async function init() {
-      const key = getKeyFromHash();
+      var key = getKeyFromHash();
       if (!key) {
         showError('No decryption key found in URL. The key should be in the URL fragment (after #).');
         return;
       }
 
       try {
-        const response = await fetch(rawUrl);
+        var response = await fetch(rawUrl);
         if (!response.ok) throw new Error('Failed to fetch content');
-        let ciphertext = new Uint8Array(await response.arrayBuffer());
+        var ciphertext = new Uint8Array(await response.arrayBuffer());
         if (storageType === 'kv') {
           ciphertext = base64ToBytes(ciphertext);
         }
-        const decrypted = await decryptContent(ciphertext, key);
+        var decrypted = await decryptContent(ciphertext, key);
         decryptedText = new TextDecoder().decode(decrypted);
-        
+
         document.getElementById('loading').style.display = 'none';
         document.getElementById('content').style.display = 'block';
         document.getElementById('copy-content-btn').disabled = false;
-        
-        const contentEl = document.getElementById('content');
+
+        var contentEl = document.getElementById('content');
         if (looksLikeMarkdown(decryptedText)) {
           contentEl.classList.add('markdown');
           contentEl.innerHTML = marked.parse(decryptedText);
@@ -1005,32 +845,23 @@ function renderEncryptedContentPage(
     function looksLikeMarkdown(text) {
       return /^#{1,6}\\s|\\*\\*|__|\\[.+\\]\\(|^\\s*[-*+]\\s|^\\s*\\d+\\.\\s|^\\\`\\\`\\\`/m.test(text);
     }
-    
+
     function escapeHtml(text) {
       return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
-    
+
     function linkify(text) {
-      return text.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+      return text.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" target="_blank" rel="noopener" style="color:#22d3ee">$1</a>');
     }
 
-    function copyUrl() {
-      navigator.clipboard.writeText(window.location.href);
-      showCopied();
-    }
-    
-    function copyContent() {
+    function copyContent(e) {
       if (!decryptedText) return;
       navigator.clipboard.writeText(decryptedText);
-      showCopied();
-    }
-    
-    function showCopied() {
-      const el = document.getElementById('copied');
-      el.classList.add('show');
-      setTimeout(() => el.classList.remove('show'), 1500);
+      var btn = e && e.currentTarget ? e.currentTarget : document.getElementById('copy-content-btn');
+      if (btn) confirmBtn(btn, btn.dataset.original);
     }
 
+    ${kbdScript(true)}
     init();
   </script>
 </body>
@@ -1059,26 +890,84 @@ export function render404(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Not Found</title>
+  <meta name="theme-color" content="#09090b">
+  <title>Not Found - shrd.sh</title>
+  ${faviconLink("shrdsh")}
+  ${fonts()}
   <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { color-scheme: dark; }
     body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #0a0a0a;
-      color: #737373;
+      font-family: 'Geist', system-ui, -apple-system, sans-serif;
+      background: #09090b;
+      color: #52525b;
       min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      -webkit-font-smoothing: antialiased;
+      position: relative;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.03;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+      background-repeat: repeat;
+      background-size: 256px 256px;
+    }
+    body > * { position: relative; z-index: 1; }
+    .icon {
+      width: 3rem;
+      height: 3rem;
+      border: 1px solid #1e1e24;
+      background: #0f0f12;
+      border-radius: 0.5rem;
       display: flex;
       align-items: center;
       justify-content: center;
+      margin-bottom: 1.25rem;
+      color: #52525b;
     }
-    .msg { text-align: center; }
-    h1 { color: #e5e5e5; font-size: 1.5rem; margin-bottom: 0.5rem; }
+    .icon svg { width: 20px; height: 20px; }
+    h1 {
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 1.125rem;
+      color: #d4d4d8;
+      margin-bottom: 0.5rem;
+    }
+    p { font-size: 0.875rem; }
+    a {
+      display: inline-block;
+      margin-top: 1.5rem;
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: 0.75rem;
+      color: #a1a1aa;
+      background: #0f0f12;
+      border: 1px solid #1e1e24;
+      border-radius: 6px;
+      padding: 0.5rem 1.25rem;
+      text-decoration: none;
+      transition: all 0.15s;
+    }
+    a:hover { border-color: #52525b; color: #e4e4e7; }
   </style>
 </head>
 <body>
-  <div class="msg">
-    <h1>Content not found</h1>
-    <p>It may have expired or been deleted.</p>
+  <div class="icon">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="8"/>
+      <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+      <line x1="8" y1="11" x2="14" y2="11"/>
+    </svg>
   </div>
+  <h1>not found</h1>
+  <p>This share may have expired or never existed.</p>
+  <a href="/">go home</a>
 </body>
 </html>`
 }
