@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -9,12 +9,23 @@ use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const DEFAULT_BASE_URL: &str = "https://shrd.stoff.dev";
 const KEY_LEN: usize = 32;
 const GENERATED_ID_LEN: usize = 6;
 const MAX_HISTORY_ITEMS: usize = 50;
+const ROOT_AFTER_HELP: &str = "Examples:\n  shrd \"hello world\"\n  shrd notes.txt\n  cat deploy.log | shrd --mode temporary\n  shrd get last\n  shrd list\n";
+const UPLOAD_AFTER_HELP: &str = "Examples:\n  shrd upload notes.txt\n  shrd upload --mode private secrets.txt\n  cat deploy.log | shrd upload --expire 1h\n  shrd upload --name release-notes README.md\n";
+const GET_AFTER_HELP: &str = "Examples:\n  shrd get abc123\n  shrd get last\n  shrd get https://shrd.stoff.dev/release-notes#key=secret\n  shrd get abc123 --meta\n";
+const LIST_AFTER_HELP: &str =
+    "Examples:\n  shrd list\n  shrd list --limit 20\n  shrd list --copy\n  shrd list --json\n";
+const CONFIG_AFTER_HELP: &str = "Examples:\n  shrd config show\n  shrd config set-url https://shrd.example.com\n  shrd config ai status\n  shrd config ai install codex\n";
+const AI_INSTALL_AFTER_HELP: &str =
+    "Examples:\n  shrd config ai install codex\n  shrd config ai install claude\n  shrd config ai install all --force\n";
+const AI_REMOVE_AFTER_HELP: &str =
+    "Examples:\n  shrd config ai remove cursor\n  shrd config ai remove all --force\n";
 
 fn encrypt_content(plaintext: &[u8]) -> Result<(Vec<u8>, String)> {
     let rng = SystemRandom::new();
@@ -138,10 +149,87 @@ enum ShareMode {
     Permanent,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum AiTool {
+    Cursor,
+    Codex,
+    #[value(alias = "claude")]
+    ClaudeCode,
+    Opencode,
+    All,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+struct UploadOptions {
+    #[arg(
+        short = 'x',
+        long = "expire",
+        alias = "expires",
+        help = "Expiry time (1h, 24h, 7d, 30d, never)"
+    )]
+    expire: Option<String>,
+
+    #[arg(short, long, help = "Delete after first view")]
+    burn: bool,
+
+    #[arg(short, long, help = "End-to-end encrypt (key in URL fragment)")]
+    encrypt: bool,
+
+    #[arg(short, long, help = "Custom name/slug")]
+    name: Option<String>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Sharing preset: temporary, private, permanent"
+    )]
+    mode: Option<ShareMode>,
+
+    #[arg(short, long, help = "Output as JSON")]
+    json: bool,
+
+    #[arg(short, long, help = "Suppress output except errors")]
+    quiet: bool,
+
+    #[arg(long, help = "Don't copy to clipboard")]
+    no_copy: bool,
+
+    #[arg(short, long, help = "Share clipboard contents")]
+    clipboard: bool,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+struct GetOptions {
+    #[arg(long, help = "Get metadata instead of content")]
+    meta: bool,
+
+    #[arg(short, long, help = "Suppress output except errors")]
+    quiet: bool,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+struct ListOptions {
+    #[arg(short, long, default_value_t = 10, help = "How many shares to show")]
+    limit: usize,
+
+    #[arg(long, help = "Copy the newest share URL")]
+    copy: bool,
+
+    #[arg(short, long, help = "Output as JSON")]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+struct ConfigOptions {
+    #[arg(short, long, global = true, help = "Output as JSON")]
+    json: bool,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "shrd")]
 #[command(about = "Share anything, instantly", long_about = None)]
 #[command(version, disable_version_flag = true)]
+#[command(after_help = ROOT_AFTER_HELP)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -149,80 +237,48 @@ struct Cli {
     #[arg(help = "Content ID to retrieve, or content to share")]
     input: Option<String>,
 
-    #[arg(
-        short = 'x',
-        long = "expire",
-        alias = "expires",
-        global = true,
-        help = "Expiry time (1h, 24h, 7d, 30d, never)"
-    )]
-    expire: Option<String>,
-
-    #[arg(short, long, global = true, help = "Delete after first view")]
-    burn: bool,
-
-    #[arg(
-        short,
-        long,
-        global = true,
-        help = "End-to-end encrypt (key in URL fragment)"
-    )]
-    encrypt: bool,
-
-    #[arg(short, long, global = true, help = "Custom name/slug")]
-    name: Option<String>,
-
-    #[arg(
-        long,
-        value_enum,
-        global = true,
-        help = "Sharing preset: temporary, private, permanent"
-    )]
-    mode: Option<ShareMode>,
-
-    #[arg(short, long, global = true, help = "Output as JSON")]
-    json: bool,
+    #[command(flatten)]
+    upload: UploadOptions,
 
     #[arg(short = 'v', long = "version", action = clap::ArgAction::Version, help = "Print version")]
     version: Option<bool>,
 
-    #[arg(short, long, global = true, help = "Suppress output except errors")]
-    quiet: bool,
-
-    #[arg(long, global = true, help = "Don't copy to clipboard")]
-    no_copy: bool,
-
-    #[arg(short, long, global = true, help = "Share clipboard contents")]
-    clipboard: bool,
-
-    #[arg(long, global = true, help = "Get metadata instead of content")]
+    #[arg(long, help = "Get metadata instead of content")]
     meta: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    #[command(about = "Share text or a file")]
+    #[command(about = "Share text or a file", after_help = UPLOAD_AFTER_HELP)]
     Upload {
         #[arg(help = "Text to share or a file path")]
         input: Option<String>,
+
+        #[command(flatten)]
+        options: UploadOptions,
     },
-    #[command(about = "Retrieve an existing share")]
+    #[command(about = "Retrieve an existing share", after_help = GET_AFTER_HELP)]
     Get {
-        #[arg(help = "Share ID or URL")]
+        #[arg(help = "Share ID, URL, or 'last'")]
         id: String,
+
+        #[command(flatten)]
+        options: GetOptions,
     },
     #[command(
         about = "Show recent shares from local history",
-        visible_alias = "list"
+        visible_alias = "recent",
+        after_help = LIST_AFTER_HELP
     )]
-    Recent {
-        #[arg(short, long, default_value_t = 10, help = "How many shares to show")]
-        limit: usize,
-        #[arg(long, help = "Copy the newest share URL")]
-        copy: bool,
+    List {
+        #[command(flatten)]
+        options: ListOptions,
     },
-    #[command(about = "Configure shrd settings")]
+    #[command(about = "Configure shrd settings", after_help = CONFIG_AFTER_HELP)]
     Config {
+        #[command(flatten)]
+        options: ConfigOptions,
+
         #[command(subcommand)]
         action: ConfigAction,
     },
@@ -232,10 +288,41 @@ enum Commands {
 enum ConfigAction {
     #[command(about = "Set the API base URL (for self-hosted instances)")]
     SetUrl { url: String },
+    #[command(about = "Install or manage global AI skills")]
+    Ai {
+        #[command(subcommand)]
+        action: AiConfigAction,
+    },
     #[command(about = "Show current configuration")]
     Show,
     #[command(about = "Reset to default configuration")]
     Reset,
+}
+
+#[derive(Debug, Subcommand)]
+enum AiConfigAction {
+    #[command(
+        about = "Install the shrd skill into a supported AI tool",
+        after_help = AI_INSTALL_AFTER_HELP
+    )]
+    Install {
+        #[arg(value_enum, help = "Tool to configure")]
+        tool: AiTool,
+        #[arg(long, help = "Replace customized skill directories")]
+        force: bool,
+    },
+    #[command(
+        about = "Remove the shrd skill from a supported AI tool",
+        after_help = AI_REMOVE_AFTER_HELP
+    )]
+    Remove {
+        #[arg(value_enum, help = "Tool to configure")]
+        tool: AiTool,
+        #[arg(long, help = "Remove customized skill directories")]
+        force: bool,
+    },
+    #[command(about = "Show installed AI skill status")]
+    Status,
 }
 
 #[derive(Serialize)]
@@ -349,6 +436,39 @@ struct HistoryEntry {
     burn: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AiSkillTarget {
+    tool: AiTool,
+    skill_dir: PathBuf,
+    skill_file: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AiSkillState {
+    Missing,
+    Installed,
+    Customized,
+}
+
+#[derive(Serialize)]
+struct AiSkillStatus {
+    tool: String,
+    status: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct ConfigSummary {
+    #[serde(rename = "baseUrl")]
+    base_url: String,
+    #[serde(rename = "configDir")]
+    config_dir: String,
+    #[serde(rename = "recentShares")]
+    recent_shares: usize,
+    #[serde(rename = "aiSkills")]
+    ai_skills: Vec<AiSkillStatus>,
+}
+
 fn get_base_url() -> String {
     // Priority: 1. Environment variable, 2. Config file, 3. Default
     if let Ok(url) = std::env::var("SHRD_BASE_URL") {
@@ -413,28 +533,35 @@ fn mode_label(mode: ShareMode) -> &'static str {
     }
 }
 
-fn effective_mode(cli: &Cli) -> Option<ShareMode> {
-    cli.mode
+fn root_get_options(cli: &Cli) -> GetOptions {
+    GetOptions {
+        meta: cli.meta,
+        quiet: cli.upload.quiet,
+    }
 }
 
-fn effective_expire(cli: &Cli) -> Option<String> {
-    if let Some(expire) = &cli.expire {
+fn effective_mode(options: &UploadOptions) -> Option<ShareMode> {
+    options.mode
+}
+
+fn effective_expire(options: &UploadOptions) -> Option<String> {
+    if let Some(expire) = &options.expire {
         return Some(expire.clone());
     }
 
-    match effective_mode(cli) {
+    match effective_mode(options) {
         Some(ShareMode::Temporary) => Some("1h".to_string()),
         Some(ShareMode::Permanent) => Some("never".to_string()),
         _ => None,
     }
 }
 
-fn effective_encrypt(cli: &Cli) -> bool {
-    cli.encrypt || matches!(effective_mode(cli), Some(ShareMode::Private))
+fn effective_encrypt(options: &UploadOptions) -> bool {
+    options.encrypt || matches!(effective_mode(options), Some(ShareMode::Private))
 }
 
-fn effective_burn(cli: &Cli) -> bool {
-    cli.burn
+fn effective_burn(options: &UploadOptions) -> bool {
+    options.burn
 }
 
 fn get_config_base_url() -> Option<String> {
@@ -467,6 +594,314 @@ fn get_config_dir() -> Result<std::path::PathBuf> {
         .join("shrd");
     std::fs::create_dir_all(&config_dir)?;
     Ok(config_dir)
+}
+
+fn get_home_dir() -> Result<PathBuf> {
+    dirs::home_dir().context("Could not find home directory")
+}
+
+fn get_xdg_config_home() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(path));
+    }
+
+    Ok(get_home_dir()?.join(".config"))
+}
+
+fn canonical_shrd_skill() -> &'static str {
+    include_str!("../assets/shrd-skill.txt")
+}
+
+impl AiTool {
+    fn label(self) -> &'static str {
+        match self {
+            AiTool::Cursor => "cursor",
+            AiTool::Codex => "codex",
+            AiTool::ClaudeCode => "claude-code",
+            AiTool::Opencode => "opencode",
+            AiTool::All => "all",
+        }
+    }
+}
+
+impl AiSkillState {
+    fn label(self) -> &'static str {
+        match self {
+            AiSkillState::Missing => "missing",
+            AiSkillState::Installed => "installed",
+            AiSkillState::Customized => "customized",
+        }
+    }
+}
+
+fn resolve_ai_skill_targets_from_roots(
+    home_dir: &Path,
+    xdg_config_home: &Path,
+    tool: AiTool,
+) -> Vec<AiSkillTarget> {
+    let tools = match tool {
+        AiTool::All => vec![
+            AiTool::Cursor,
+            AiTool::Codex,
+            AiTool::ClaudeCode,
+            AiTool::Opencode,
+        ],
+        _ => vec![tool],
+    };
+
+    tools
+        .into_iter()
+        .map(|tool| {
+            let skill_dir = match tool {
+                AiTool::Cursor => home_dir.join(".cursor").join("skills").join("shrd"),
+                AiTool::Codex => home_dir.join(".codex").join("skills").join("shrd"),
+                AiTool::ClaudeCode => home_dir.join(".claude").join("skills").join("shrd"),
+                AiTool::Opencode => xdg_config_home.join("opencode").join("skills").join("shrd"),
+                AiTool::All => unreachable!(),
+            };
+
+            AiSkillTarget {
+                tool,
+                skill_file: skill_dir.join("SKILL.md"),
+                skill_dir,
+            }
+        })
+        .collect()
+}
+
+fn resolve_ai_skill_targets(tool: AiTool) -> Result<Vec<AiSkillTarget>> {
+    Ok(resolve_ai_skill_targets_from_roots(
+        &get_home_dir()?,
+        &get_xdg_config_home()?,
+        tool,
+    ))
+}
+
+fn ai_skill_dir_has_extra_files(target: &AiSkillTarget) -> Result<bool> {
+    if !target.skill_dir.exists() {
+        return Ok(false);
+    }
+
+    for entry in std::fs::read_dir(&target.skill_dir)? {
+        let entry = entry?;
+        if entry.file_name() != "SKILL.md" {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn ai_skill_state(target: &AiSkillTarget) -> Result<AiSkillState> {
+    if !target.skill_file.exists() {
+        if target.skill_dir.exists() && ai_skill_dir_has_extra_files(target)? {
+            return Ok(AiSkillState::Customized);
+        }
+        return Ok(AiSkillState::Missing);
+    }
+
+    let existing = std::fs::read_to_string(&target.skill_file)?;
+    if existing == canonical_shrd_skill() && !ai_skill_dir_has_extra_files(target)? {
+        return Ok(AiSkillState::Installed);
+    }
+
+    Ok(AiSkillState::Customized)
+}
+
+fn ai_skill_statuses(tool: AiTool) -> Result<Vec<AiSkillStatus>> {
+    let targets = resolve_ai_skill_targets(tool)?;
+    targets
+        .into_iter()
+        .map(|target| {
+            let state = ai_skill_state(&target)?;
+            Ok(AiSkillStatus {
+                tool: target.tool.label().to_string(),
+                status: state.label().to_string(),
+                path: target.skill_file.display().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn install_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<()> {
+    let state = ai_skill_state(target)?;
+    if state == AiSkillState::Installed {
+        return Ok(());
+    }
+
+    if state == AiSkillState::Customized && !force {
+        anyhow::bail!(
+            "{} has a customized shrd skill at {}. Re-run with --force to replace it.",
+            target.tool.label(),
+            target.skill_file.display()
+        );
+    }
+
+    if target.skill_dir.exists() && force {
+        std::fs::remove_dir_all(&target.skill_dir)?;
+    }
+
+    std::fs::create_dir_all(&target.skill_dir)?;
+    std::fs::write(&target.skill_file, canonical_shrd_skill())?;
+    Ok(())
+}
+
+fn remove_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<bool> {
+    if !target.skill_dir.exists() {
+        return Ok(false);
+    }
+
+    let state = ai_skill_state(target)?;
+    if state == AiSkillState::Customized && !force {
+        anyhow::bail!(
+            "{} has a customized shrd skill at {}. Re-run with --force to remove it.",
+            target.tool.label(),
+            target.skill_file.display()
+        );
+    }
+
+    std::fs::remove_dir_all(&target.skill_dir)?;
+    Ok(true)
+}
+
+fn install_ai_skills(json: bool, tool: AiTool, force: bool) -> Result<()> {
+    let targets = resolve_ai_skill_targets(tool)?;
+    for target in &targets {
+        let state = ai_skill_state(target)?;
+        if state == AiSkillState::Customized && !force {
+            anyhow::bail!(
+                "{} has a customized shrd skill at {}. Re-run with --force to replace it.",
+                target.tool.label(),
+                target.skill_file.display()
+            );
+        }
+    }
+
+    for target in &targets {
+        install_ai_skill_target(target, force)?;
+    }
+
+    let statuses: Vec<AiSkillStatus> = targets
+        .into_iter()
+        .map(|target| AiSkillStatus {
+            tool: target.tool.label().to_string(),
+            status: "installed".to_string(),
+            path: target.skill_file.display().to_string(),
+        })
+        .collect();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&statuses)?);
+    } else {
+        for status in statuses {
+            println!(
+                "{} Installed shrd skill for {} at {}",
+                "✓".green(),
+                status.tool.cyan(),
+                status.path.dimmed()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_ai_skills(json: bool, tool: AiTool, force: bool) -> Result<()> {
+    let targets = resolve_ai_skill_targets(tool)?;
+    let mut removed = Vec::new();
+
+    for target in &targets {
+        let state = ai_skill_state(target)?;
+        if state == AiSkillState::Customized && !force {
+            anyhow::bail!(
+                "{} has a customized shrd skill at {}. Re-run with --force to remove it.",
+                target.tool.label(),
+                target.skill_file.display()
+            );
+        }
+    }
+
+    for target in &targets {
+        let was_removed = remove_ai_skill_target(target, force)?;
+        removed.push(AiSkillStatus {
+            tool: target.tool.label().to_string(),
+            status: if was_removed {
+                "removed".to_string()
+            } else {
+                "missing".to_string()
+            },
+            path: target.skill_file.display().to_string(),
+        });
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&removed)?);
+    } else {
+        for status in removed {
+            if status.status == "removed" {
+                println!(
+                    "{} Removed shrd skill for {} from {}",
+                    "✓".green(),
+                    status.tool.cyan(),
+                    status.path.dimmed()
+                );
+            } else {
+                println!(
+                    "{} No shrd skill installed for {} at {}",
+                    "•".yellow(),
+                    status.tool.cyan(),
+                    status.path.dimmed()
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_ai_skill_status(json: bool, tool: AiTool) -> Result<()> {
+    let statuses = ai_skill_statuses(tool)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&statuses)?);
+        return Ok(());
+    }
+
+    println!("{:<14} {:<12} {}", "tool", "status", "path");
+    for status in statuses {
+        println!("{:<14} {:<12} {}", status.tool, status.status, status.path);
+    }
+
+    Ok(())
+}
+
+fn print_config_show(json: bool) -> Result<()> {
+    let base_url = get_base_url();
+    let config_dir = get_config_dir()?;
+    let history_count = load_history().map(|entries| entries.len()).unwrap_or(0);
+    let ai_skills = ai_skill_statuses(AiTool::All)?;
+
+    if json {
+        let summary = ConfigSummary {
+            base_url,
+            config_dir: config_dir.display().to_string(),
+            recent_shares: history_count,
+            ai_skills,
+        };
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    println!("Configuration:");
+    println!("  Base URL: {}", base_url.cyan());
+    println!("  Config dir: {}", config_dir.display());
+    println!("  Recent shares: {}", history_count);
+    println!("  AI skills:");
+    for status in ai_skills {
+        println!("    {}: {} ({})", status.tool, status.status, status.path);
+    }
+
+    Ok(())
 }
 
 const DEFAULT_UPLOAD_SPEED: f64 = 500_000.0; // 500 KB/s conservative default
@@ -554,7 +989,7 @@ fn get_clipboard() -> Result<String> {
 }
 
 async fn push_content(
-    cli: &Cli,
+    options: &UploadOptions,
     content: String,
     content_type: Option<String>,
     filename: Option<String>,
@@ -563,9 +998,9 @@ async fn push_content(
     let client = reqwest::Client::new();
     let base_url = get_base_url();
 
-    let encrypt = effective_encrypt(cli);
-    let burn = effective_burn(cli);
-    let expire = effective_expire(cli);
+    let encrypt = effective_encrypt(options);
+    let burn = effective_burn(options);
+    let expire = effective_expire(options);
 
     let (final_content, encryption_key) = if encrypt {
         let (encrypted_content, key) = encrypt_content(content.as_bytes())?;
@@ -579,7 +1014,7 @@ async fn push_content(
         content: final_content,
         expire,
         burn,
-        name: cli.name.clone(),
+        name: options.name.clone(),
         content_type,
         filename,
         encrypted: encrypt,
@@ -590,7 +1025,7 @@ async fn push_content(
 
     let upload_speed = get_upload_speed();
     let estimated_seconds = body_size as f64 / upload_speed;
-    let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
+    let show_progress = estimated_seconds > 10.0 && !options.quiet && !options.json;
 
     let progress_bar = if show_progress {
         let pb = ProgressBar::new(body_size as u64);
@@ -644,8 +1079,8 @@ async fn push_content(
     }
 
     let result: PushResponse = response.json().await?;
-    print_result(cli, &result, encryption_key.as_deref());
-    let _ = record_history(cli, &result, encryption_key.as_deref(), source);
+    print_result(options, &result, encryption_key.as_deref());
+    let _ = record_history(options, &result, encryption_key.as_deref(), source);
 
     Ok(())
 }
@@ -653,14 +1088,14 @@ async fn push_content(
 const MULTIPART_THRESHOLD: u64 = 95 * 1024 * 1024; // 95MB - use multipart for larger
 const PART_SIZE: u64 = 50 * 1024 * 1024; // 50MB parts
 
-async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
+async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()> {
     let path_obj = std::path::Path::new(path);
     let file_size = std::fs::metadata(path)
         .with_context(|| format!("Failed to read file: {}", path))?
         .len();
 
     if file_size > MULTIPART_THRESHOLD {
-        return upload_file_multipart(cli, path, file_size).await;
+        return upload_file_multipart(options, path, file_size).await;
     }
 
     let filename = path_obj
@@ -675,9 +1110,9 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     let file_content =
         std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
 
-    let encrypt = effective_encrypt(cli);
-    let burn = effective_burn(cli);
-    let expire = effective_expire(cli);
+    let encrypt = effective_encrypt(options);
+    let burn = effective_burn(options);
+    let expire = effective_expire(options);
 
     let (upload_content, encryption_key, content_size) = if encrypt {
         let (encrypted, key) = encrypt_content(&file_content)?;
@@ -689,7 +1124,7 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
 
     let upload_speed = get_upload_speed();
     let estimated_seconds = content_size as f64 / upload_speed;
-    let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
+    let show_progress = estimated_seconds > 10.0 && !options.quiet && !options.json;
 
     let progress_bar = if show_progress {
         let pb = ProgressBar::new(content_size);
@@ -738,7 +1173,7 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     if let Some(ref expire) = expire {
         req = req.header("X-Expire", expire);
     }
-    if let Some(ref name) = cli.name {
+    if let Some(ref name) = options.name {
         req = req.header("X-Name", name);
     }
 
@@ -759,9 +1194,9 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     }
 
     let result: PushResponse = response.json().await?;
-    print_result(cli, &result, encryption_key.as_deref());
+    print_result(options, &result, encryption_key.as_deref());
     let _ = record_history(
-        cli,
+        options,
         &result,
         encryption_key.as_deref(),
         Some(path.to_string()),
@@ -776,7 +1211,7 @@ struct MultipartInitResponse {
     upload_id: String,
 }
 
-async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<()> {
+async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u64) -> Result<()> {
     let path_obj = std::path::Path::new(path);
     let filename = path_obj
         .file_name()
@@ -790,9 +1225,9 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     let file_content =
         std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
 
-    let encrypt = effective_encrypt(cli);
-    let burn = effective_burn(cli);
-    let expire = effective_expire(cli);
+    let encrypt = effective_encrypt(options);
+    let burn = effective_burn(options);
+    let expire = effective_expire(options);
 
     let (upload_content, encryption_key, content_size) = if encrypt {
         let (encrypted, key) = encrypt_content(&file_content)?;
@@ -816,7 +1251,7 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     if let Some(ref expire) = expire {
         init_req = init_req.header("X-Expire", expire);
     }
-    if let Some(ref name) = cli.name {
+    if let Some(ref name) = options.name {
         init_req = init_req.header("X-Name", name);
     }
 
@@ -832,7 +1267,7 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
 
     let upload_speed = get_upload_speed();
     let estimated_seconds = content_size as f64 / upload_speed;
-    let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
+    let show_progress = estimated_seconds > 10.0 && !options.quiet && !options.json;
 
     let progress_bar = if show_progress {
         let pb = ProgressBar::new(content_size);
@@ -921,9 +1356,9 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     }
 
     let result: PushResponse = complete_response.json().await?;
-    print_result(cli, &result, encryption_key.as_deref());
+    print_result(options, &result, encryption_key.as_deref());
     let _ = record_history(
-        cli,
+        options,
         &result,
         encryption_key.as_deref(),
         Some(path.to_string()),
@@ -941,15 +1376,15 @@ fn resolve_result_urls(result: &PushResponse, encryption_key: Option<&str>) -> (
     }
 }
 
-fn summarize_share(result: &PushResponse, cli: &Cli) -> String {
+fn summarize_share(result: &PushResponse, options: &UploadOptions) -> String {
     let mut labels = Vec::new();
-    if let Some(mode) = effective_mode(cli) {
+    if let Some(mode) = effective_mode(options) {
         labels.push(mode_label(mode).to_string());
     }
-    if effective_encrypt(cli) && effective_mode(cli) != Some(ShareMode::Private) {
+    if effective_encrypt(options) && effective_mode(options) != Some(ShareMode::Private) {
         labels.push("encrypted".to_string());
     }
-    if effective_burn(cli) {
+    if effective_burn(options) {
         labels.push("burn".to_string());
     }
     if let Some(name) = &result.name {
@@ -964,7 +1399,7 @@ fn summarize_share(result: &PushResponse, cli: &Cli) -> String {
 }
 
 fn record_history(
-    cli: &Cli,
+    options: &UploadOptions,
     result: &PushResponse,
     encryption_key: Option<&str>,
     source: Option<String>,
@@ -980,16 +1415,16 @@ fn record_history(
         name: result.name.clone(),
         created_at: unix_now(),
         source,
-        mode: effective_mode(cli).map(|mode| mode_label(mode).to_string()),
-        encrypted: effective_encrypt(cli),
-        burn: effective_burn(cli),
+        mode: effective_mode(options).map(|mode| mode_label(mode).to_string()),
+        encrypted: effective_encrypt(options),
+        burn: effective_burn(options),
     })
 }
 
-fn print_result(cli: &Cli, result: &PushResponse, encryption_key: Option<&str>) {
+fn print_result(options: &UploadOptions, result: &PushResponse, encryption_key: Option<&str>) {
     let (url, raw_url) = resolve_result_urls(result, encryption_key);
 
-    if cli.json {
+    if options.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1003,10 +1438,10 @@ fn print_result(cli: &Cli, result: &PushResponse, encryption_key: Option<&str>) 
             }))
             .unwrap_or_default()
         );
-    } else if !cli.quiet {
+    } else if !options.quiet {
         println!("{} {}", "→".green(), url.cyan());
-        eprintln!("{}", summarize_share(result, cli).dimmed());
-        if !cli.no_copy {
+        eprintln!("{}", summarize_share(result, options).dimmed());
+        if !options.no_copy {
             if copy_to_clipboard(&url).is_ok() {
                 eprintln!("{}", "(copied to clipboard)".dimmed());
             }
@@ -1079,10 +1514,10 @@ fn format_history_age(created_at: u64) -> String {
     format!("{}d ago", diff / 86400)
 }
 
-fn print_recent_shares(cli: &Cli, limit: usize, copy: bool) -> Result<()> {
+fn print_recent_shares(options: &ListOptions) -> Result<()> {
     let entries = load_history()?;
     if entries.is_empty() {
-        if cli.json {
+        if options.json {
             println!("[]");
         } else {
             println!("No recent shares yet.");
@@ -1090,16 +1525,16 @@ fn print_recent_shares(cli: &Cli, limit: usize, copy: bool) -> Result<()> {
         return Ok(());
     }
 
-    if copy {
+    if options.copy {
         let latest = &entries[0];
         copy_to_clipboard(&latest.url)?;
         println!("{} {}", "→".green(), latest.url.cyan());
         return Ok(());
     }
 
-    let shown_entries: Vec<HistoryEntry> = entries.into_iter().take(limit).collect();
+    let shown_entries: Vec<HistoryEntry> = entries.into_iter().take(options.limit).collect();
 
-    if cli.json {
+    if options.json {
         println!("{}", serde_json::to_string_pretty(&shown_entries)?);
         return Ok(());
     }
@@ -1132,7 +1567,7 @@ fn print_recent_shares(cli: &Cli, limit: usize, copy: bool) -> Result<()> {
     Ok(())
 }
 
-async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
+async fn pull_content(options: &GetOptions, id: &str) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
     let client = reqwest::Client::new();
@@ -1141,7 +1576,7 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
     let (raw_id, decryption_key) = parse_id_and_key(&resolved_reference);
     let id = normalize_share_id(&raw_id);
 
-    if cli.meta {
+    if options.meta {
         let response = client
             .get(format!("{}/{}/meta", base_url, id))
             .send()
@@ -1213,7 +1648,7 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
             file.write_all(&decrypted).await?;
             file.flush().await?;
 
-            if !cli.quiet {
+            if !options.quiet {
                 println!("{} {}", "→".green(), save_path.cyan());
             }
             return Ok(());
@@ -1228,7 +1663,7 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
     let content_length = meta.size;
     let upload_speed = get_upload_speed();
     let estimated_seconds = content_length as f64 / upload_speed;
-    let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json && is_tty;
+    let show_progress = estimated_seconds > 10.0 && !options.quiet && is_tty;
 
     let progress_bar = if show_progress {
         let pb = ProgressBar::new(content_length);
@@ -1268,7 +1703,7 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
             pb.finish_and_clear();
         }
 
-        if !cli.quiet {
+        if !options.quiet {
             println!("{} {}", "→".green(), save_path.cyan());
         }
     } else {
@@ -1293,18 +1728,22 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn upload_from_source(cli: &Cli, input: Option<&str>) -> Result<()> {
-    if cli.clipboard {
+async fn upload_from_source(
+    options: &UploadOptions,
+    input: Option<&str>,
+    explicit_upload: bool,
+) -> Result<()> {
+    if options.clipboard {
         let content = get_clipboard()?;
-        return push_content(cli, content, None, None, Some("clipboard".to_string())).await;
+        return push_content(options, content, None, None, Some("clipboard".to_string())).await;
     }
 
     if let Some(input) = input {
         if std::path::Path::new(input).exists() {
-            return upload_file_streaming(cli, input).await;
+            return upload_file_streaming(options, input).await;
         }
         return push_content(
-            cli,
+            options,
             input.to_string(),
             None,
             None,
@@ -1319,27 +1758,44 @@ async fn upload_from_source(cli: &Cli, input: Option<&str>) -> Result<()> {
         if content.is_empty() {
             anyhow::bail!("No content provided");
         }
-        return push_content(cli, content, None, None, Some("stdin".to_string())).await;
+        return push_content(options, content, None, None, Some("stdin".to_string())).await;
     }
 
-    println!("{}", "Usage: shrd [OPTIONS] [INPUT]".yellow());
+    let usage = if explicit_upload {
+        "Usage: shrd upload [OPTIONS] [INPUT]"
+    } else {
+        "Usage: shrd [OPTIONS] [INPUT]"
+    };
+    println!("{}", usage.yellow());
     println!();
     println!("Examples:");
-    println!(
-        "  {} | shrd           # Share from pipe",
-        "cat file.txt".dimmed()
-    );
-    println!("  {} file.txt           # Share a file", "shrd".dimmed());
-    println!(
-        "  {} upload file.txt    # Explicit upload mode",
-        "shrd".dimmed()
-    );
+    if explicit_upload {
+        println!(
+            "  {} | shrd upload      # Share from pipe",
+            "cat file.txt".dimmed()
+        );
+        println!("  {} upload file.txt    # Share a file", "shrd".dimmed());
+        println!("  {} upload -c          # Share clipboard", "shrd".dimmed());
+        println!("  {} upload --mode private secrets.txt", "shrd".dimmed());
+    } else {
+        println!(
+            "  {} | shrd           # Share from pipe",
+            "cat file.txt".dimmed()
+        );
+        println!("  {} file.txt           # Share a file", "shrd".dimmed());
+        println!(
+            "  {} upload file.txt    # Explicit upload mode",
+            "shrd".dimmed()
+        );
+    }
     println!("  {} get abc123         # Retrieve by ID", "shrd".dimmed());
     println!(
-        "  {} recent             # Show recent shares",
+        "  {} list               # Show recent shares",
         "shrd".dimmed()
     );
-    println!("  {} -c                 # Share clipboard", "shrd".dimmed());
+    if !explicit_upload {
+        println!("  {} -c                 # Share clipboard", "shrd".dimmed());
+    }
     println!();
     println!("Run {} for more options.", "shrd --help".cyan());
 
@@ -1351,25 +1807,30 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::Upload { input }) => {
-            return upload_from_source(&cli, input.as_deref()).await
+        Some(Commands::Upload { input, options }) => {
+            return upload_from_source(options, input.as_deref(), true).await
         }
-        Some(Commands::Get { id }) => return pull_content(&cli, id).await,
-        Some(Commands::Recent { limit, copy }) => return print_recent_shares(&cli, *limit, *copy),
-        Some(Commands::Config { action }) => {
+        Some(Commands::Get { id, options }) => return pull_content(options, id).await,
+        Some(Commands::List { options }) => return print_recent_shares(options),
+        Some(Commands::Config { options, action }) => {
             match action {
                 ConfigAction::SetUrl { url } => {
                     save_config_url(url)?;
                     println!("{} Base URL set to: {}", "✓".green(), url.cyan());
                 }
+                ConfigAction::Ai { action } => match action {
+                    AiConfigAction::Install { tool, force } => {
+                        install_ai_skills(options.json, *tool, *force)?;
+                    }
+                    AiConfigAction::Remove { tool, force } => {
+                        remove_ai_skills(options.json, *tool, *force)?;
+                    }
+                    AiConfigAction::Status => {
+                        print_ai_skill_status(options.json, AiTool::All)?;
+                    }
+                },
                 ConfigAction::Show => {
-                    let base_url = get_base_url();
-                    let config_dir = get_config_dir()?;
-                    let history_count = load_history().map(|entries| entries.len()).unwrap_or(0);
-                    println!("Configuration:");
-                    println!("  Base URL: {}", base_url.cyan());
-                    println!("  Config dir: {}", config_dir.display());
-                    println!("  Recent shares: {}", history_count);
+                    print_config_show(options.json)?;
                 }
                 ConfigAction::Reset => {
                     let config_dir = get_config_dir()?;
@@ -1387,17 +1848,19 @@ async fn main() -> Result<()> {
 
     if let Some(ref input) = cli.input {
         if cli.meta || looks_like_share_reference(input) {
-            return pull_content(&cli, input).await;
+            return pull_content(&root_get_options(&cli), input).await;
         }
-        return upload_from_source(&cli, Some(input)).await;
+        return upload_from_source(&cli.upload, Some(input), false).await;
     }
 
-    upload_from_source(&cli, None).await
+    upload_from_source(&cli.upload, None, false).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
+    use std::fs;
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
@@ -1553,10 +2016,10 @@ mod tests {
         let cli = Cli::try_parse_from(["shrd", "upload", "--expires", "7d", "notes.txt"])
             .expect("cli should parse");
 
-        assert_eq!(cli.expire.as_deref(), Some("7d"));
         match cli.command {
-            Some(Commands::Upload { input }) => {
+            Some(Commands::Upload { input, options }) => {
                 assert_eq!(input.as_deref(), Some("notes.txt"));
+                assert_eq!(options.expire.as_deref(), Some("7d"));
             }
             _ => panic!("expected upload command"),
         }
@@ -1568,23 +2031,30 @@ mod tests {
             .expect("cli should parse");
 
         match cli.command {
-            Some(Commands::Get { id }) => {
+            Some(Commands::Get { id, options }) => {
                 assert_eq!(id, "release_notes#key=abc");
+                assert!(!options.meta);
             }
             _ => panic!("expected get command"),
         }
     }
 
     #[test]
-    fn cli_supports_recent_alias() {
+    fn cli_supports_list_and_recent_alias() {
         let cli = Cli::try_parse_from(["shrd", "list", "--limit", "5"]).expect("cli should parse");
 
         match cli.command {
-            Some(Commands::Recent { limit, copy }) => {
-                assert_eq!(limit, 5);
-                assert!(!copy);
+            Some(Commands::List { options }) => {
+                assert_eq!(options.limit, 5);
+                assert!(!options.copy);
             }
-            _ => panic!("expected recent command"),
+            _ => panic!("expected list command"),
+        }
+
+        let alias = Cli::try_parse_from(["shrd", "recent", "--copy"]).expect("alias should parse");
+        match alias.command {
+            Some(Commands::List { options }) => assert!(options.copy),
+            _ => panic!("expected list command"),
         }
     }
 
@@ -1593,12 +2063,222 @@ mod tests {
         let cli = Cli::try_parse_from(["shrd", "--mode", "permanent", "notes.txt"])
             .expect("cli should parse");
 
-        assert_eq!(cli.mode, Some(ShareMode::Permanent));
+        assert_eq!(cli.upload.mode, Some(ShareMode::Permanent));
     }
 
     #[test]
     fn lowercase_v_is_version_flag() {
         let err = Cli::try_parse_from(["shrd", "-v"]).expect_err("version should exit early");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn cli_supports_config_ai_install() {
+        let cli = Cli::try_parse_from(["shrd", "config", "ai", "install", "claude-code"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Config {
+                options,
+                action:
+                    ConfigAction::Ai {
+                        action: AiConfigAction::Install { tool, force },
+                    },
+            }) => {
+                assert!(!options.json);
+                assert_eq!(tool, AiTool::ClaudeCode);
+                assert!(!force);
+            }
+            _ => panic!("expected config ai install command"),
+        }
+    }
+
+    #[test]
+    fn cli_supports_claude_alias_for_ai_tool() {
+        let cli = Cli::try_parse_from(["shrd", "config", "ai", "install", "claude"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Config {
+                action:
+                    ConfigAction::Ai {
+                        action: AiConfigAction::Install { tool, .. },
+                    },
+                ..
+            }) => assert_eq!(tool, AiTool::ClaudeCode),
+            _ => panic!("expected config ai install command"),
+        }
+    }
+
+    #[test]
+    fn config_json_flag_reaches_ai_subcommands() {
+        let cli = Cli::try_parse_from(["shrd", "config", "ai", "status", "--json"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Config {
+                options,
+                action:
+                    ConfigAction::Ai {
+                        action: AiConfigAction::Status,
+                    },
+            }) => assert!(options.json),
+            _ => panic!("expected config ai status command"),
+        }
+    }
+
+    #[test]
+    fn config_help_only_shows_config_flags() {
+        let err = Cli::try_parse_from(["shrd", "config", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(help.contains("--json"));
+        assert!(!help.contains("--expire"));
+        assert!(!help.contains("--clipboard"));
+        assert!(!help.contains("--meta"));
+    }
+
+    #[test]
+    fn get_help_only_shows_get_flags() {
+        let err = Cli::try_parse_from(["shrd", "get", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(help.contains("--meta"));
+        assert!(help.contains("shrd get last"));
+        assert!(!help.contains("--expire"));
+        assert!(!help.contains("--clipboard"));
+    }
+
+    #[test]
+    fn upload_help_does_not_show_meta_flag() {
+        let err = Cli::try_parse_from(["shrd", "upload", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(!help.contains("--meta"));
+        assert!(help.contains("shrd upload notes.txt"));
+    }
+
+    #[test]
+    fn list_help_shows_primary_command_name() {
+        let err = Cli::try_parse_from(["shrd", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(help.contains("  list"));
+        assert!(help.contains("[aliases: recent]"));
+        assert!(help.contains("shrd list"));
+    }
+
+    #[test]
+    fn shrd_skill_content_matches_current_cli_surface() {
+        let skill = canonical_shrd_skill();
+        assert!(skill.contains("shrd upload path/to/file"));
+        assert!(skill.contains("shrd get last"));
+        assert!(skill.contains("shrd list"));
+        assert!(skill.contains("--mode <mode>"));
+        assert!(!skill.contains("shrd login"));
+        assert!(!skill.contains("shrd logout"));
+        assert!(!skill.contains("shrd whoami"));
+    }
+
+    #[test]
+    fn resolve_ai_skill_targets_uses_expected_paths() {
+        let home = PathBuf::from("/tmp/home");
+        let xdg = PathBuf::from("/tmp/xdg");
+        let targets = resolve_ai_skill_targets_from_roots(&home, &xdg, AiTool::All);
+
+        let paths: Vec<(AiTool, PathBuf)> = targets
+            .into_iter()
+            .map(|target| (target.tool, target.skill_file))
+            .collect();
+
+        assert!(paths.contains(&(
+            AiTool::Cursor,
+            home.join(".cursor")
+                .join("skills")
+                .join("shrd")
+                .join("SKILL.md"),
+        )));
+        assert!(paths.contains(&(
+            AiTool::Codex,
+            home.join(".codex")
+                .join("skills")
+                .join("shrd")
+                .join("SKILL.md"),
+        )));
+        assert!(paths.contains(&(
+            AiTool::ClaudeCode,
+            home.join(".claude")
+                .join("skills")
+                .join("shrd")
+                .join("SKILL.md"),
+        )));
+        assert!(paths.contains(&(
+            AiTool::Opencode,
+            xdg.join("opencode")
+                .join("skills")
+                .join("shrd")
+                .join("SKILL.md"),
+        )));
+    }
+
+    #[test]
+    fn install_ai_skill_writes_canonical_skill() {
+        let root = std::env::temp_dir().join(format!("shrd-ai-install-{}", unix_now()));
+        let target = AiSkillTarget {
+            tool: AiTool::Codex,
+            skill_dir: root.join("skill"),
+            skill_file: root.join("skill").join("SKILL.md"),
+        };
+
+        install_ai_skill_target(&target, false).expect("install should succeed");
+
+        let written = fs::read_to_string(&target.skill_file).expect("skill should exist");
+        assert_eq!(written, canonical_shrd_skill());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_ai_skill_requires_force_for_customized_skill() {
+        let root = std::env::temp_dir().join(format!("shrd-ai-custom-{}", unix_now()));
+        let target = AiSkillTarget {
+            tool: AiTool::Cursor,
+            skill_dir: root.join("skill"),
+            skill_file: root.join("skill").join("SKILL.md"),
+        };
+
+        fs::create_dir_all(&target.skill_dir).expect("skill dir");
+        fs::write(&target.skill_file, "custom skill").expect("custom skill");
+
+        let err = install_ai_skill_target(&target, false).expect_err("install should fail");
+        assert!(err.to_string().contains("--force"));
+
+        install_ai_skill_target(&target, true).expect("forced install should succeed");
+        let written = fs::read_to_string(&target.skill_file).expect("skill should exist");
+        assert_eq!(written, canonical_shrd_skill());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_ai_skill_requires_force_for_extra_files() {
+        let root = std::env::temp_dir().join(format!("shrd-ai-remove-{}", unix_now()));
+        let target = AiSkillTarget {
+            tool: AiTool::Opencode,
+            skill_dir: root.join("skill"),
+            skill_file: root.join("skill").join("SKILL.md"),
+        };
+
+        fs::create_dir_all(&target.skill_dir).expect("skill dir");
+        fs::write(&target.skill_file, canonical_shrd_skill()).expect("canonical skill");
+        fs::write(target.skill_dir.join("notes.txt"), "custom").expect("extra file");
+
+        let err = remove_ai_skill_target(&target, false).expect_err("remove should fail");
+        assert!(err.to_string().contains("--force"));
+
+        remove_ai_skill_target(&target, true).expect("forced remove should succeed");
+        assert!(!target.skill_dir.exists());
+
+        let _ = fs::remove_dir_all(root);
     }
 }

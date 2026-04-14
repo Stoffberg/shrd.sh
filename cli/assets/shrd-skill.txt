@@ -1,0 +1,44 @@
+---
+name: shrd
+description: Share content instantly via shrd.sh. Use when the user wants to share text, files, logs, code snippets, or clipboard contents with a link.
+---
+
+`shrd` shares content instantly via shrd.sh.
+
+## When to use
+
+- Share a file, snippet, log, or clipboard contents with a short link
+- Pull back the latest share or inspect share metadata
+- Create private, temporary, or permanent drops from the terminal
+
+## Usage
+
+| Action | Command |
+|--------|---------|
+| Share text | `echo "content" \| shrd` |
+| Share file | `shrd path/to/file` |
+| Share clipboard | `shrd -c` |
+| Explicit upload | `shrd upload path/to/file` |
+| Retrieve content | `shrd get <share-id>` |
+| Retrieve the latest share | `shrd get last` |
+| List recent shares | `shrd list` |
+| Get metadata | `shrd <share-id> --meta` |
+
+## Options
+
+| Flag | Purpose |
+|------|---------|
+| `-x <time>` | Expiry: `1h`, `24h`, `7d`, `30d`, `never` |
+| `-b` | Burn after first view |
+| `-e` | End-to-end encrypt (key in URL fragment) |
+| `-n <name>` | Custom slug |
+| `--mode <mode>` | Share preset: `temporary`, `private`, `permanent` |
+| `-j` | JSON output |
+| `-q` | Quiet (errors only) |
+| `--no-copy` | Don't copy the URL to the clipboard |
+
+## Notes
+
+- By default, the share URL is copied to the clipboard when that is supported.
+- Use `--mode private` or `-e` for encrypted shares.
+- Use `--mode permanent` or `-x never` for durable links.
