@@ -25,6 +25,8 @@ colored = "2.1"
 atty = "0.2"
 indicatif = "0.17"
 futures = "0.3"
+fuzzy-matcher = "0.3"
+opener = "0.7"
 
 [features]
 default = ["clipboard"]

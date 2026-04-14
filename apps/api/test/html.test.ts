@@ -28,6 +28,27 @@ describe("HTML font assets", () => {
     expect(html).not.toContain("style.min.css")
   })
 
+  it("keeps plain content pages visible", () => {
+    const html = renderContentPage("hello", createMetadata(), "https://shrd.sh")
+
+    expect(html).toContain('<div class="content-box" id="content"><pre>hello</pre></div>')
+    expect(html).not.toContain('<div id="loading" class="loading-box">')
+    expect(html).not.toContain('<div id="error" class="error-box">')
+  })
+
+  it("hides encrypted content until decryption completes", () => {
+    const html = renderContentPage(
+      "secret",
+      createMetadata({ encrypted: true }),
+      "https://shrd.sh"
+    )
+
+    expect(html).toContain('<div id="loading" class="loading-box">')
+    expect(html).toContain('<div id="error" class="error-box">')
+    expect(html).toContain('<div class="content-box" id="content"></div>')
+    expect(html).toContain("document.getElementById('content').style.display = 'block';")
+  })
+
   it("renders the 404 page without broken Geist stylesheet links", () => {
     const html = render404()
 

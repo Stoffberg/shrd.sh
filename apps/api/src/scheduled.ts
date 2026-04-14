@@ -1,4 +1,10 @@
 import type { Env } from "./types"
+import {
+  cleanupExpiredShares,
+  cleanupStaleMultipartSessions,
+  shareExistsForStorageKey,
+} from "./storage"
+import { collectStorageSnapshot, recordStorageSnapshot } from "./stats"
 
 export async function cleanupOrphanedR2(env: Env): Promise<{ deleted: number; checked: number }> {
   let deleted = 0
@@ -10,8 +16,8 @@ export async function cleanupOrphanedR2(env: Env): Promise<{ deleted: number; ch
 
     for (const object of listed.objects) {
       checked++
-      const kvExists = await env.CONTENT.get(`content:${object.key}`)
-      if (!kvExists) {
+      const exists = await shareExistsForStorageKey(env, object.key)
+      if (!exists) {
         await env.STORAGE.delete(object.key)
         deleted++
       }
@@ -25,8 +31,16 @@ export async function cleanupOrphanedR2(env: Env): Promise<{ deleted: number; ch
 
 export function handleScheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
   ctx.waitUntil(
-    cleanupOrphanedR2(env).then((result) => {
-      console.log(`R2 cleanup: checked ${result.checked}, deleted ${result.deleted}`)
+    Promise.all([
+      cleanupOrphanedR2(env),
+      cleanupExpiredShares(env),
+      cleanupStaleMultipartSessions(env),
+    ]).then(async ([r2Cleanup, expiredShares, staleMultipart]) => {
+      const snapshot = await collectStorageSnapshot(env, r2Cleanup)
+      await recordStorageSnapshot(env, snapshot)
+      console.log(
+        `scheduled cleanup: r2 checked ${r2Cleanup.checked}, r2 deleted ${r2Cleanup.deleted}, expired shares ${expiredShares}, stale multipart ${staleMultipart}, cron ${event.cron}`
+      )
     })
   )
 }

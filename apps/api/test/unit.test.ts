@@ -46,6 +46,11 @@ async function readBody(body: string | ReadableStream | Uint8Array): Promise<Uin
   return result
 }
 
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", encodeBody(value))
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
 function createMockEnv(): Env {
   const kvStore = new Map<string, string>()
   const r2Store = new Map<string, { body: Uint8Array; customMetadata?: Record<string, string> }>()
@@ -115,6 +120,10 @@ function createMockEnv(): Env {
             offset += chunk.length
           }
           r2Store.set(key, { body: merged, customMetadata: upload.customMetadata })
+        }),
+        abort: vi.fn(async () => {
+          multipartParts.delete(uploadId)
+          multipartUploads.delete(uploadId)
         }),
       })),
     } as unknown as R2Bucket,
@@ -360,6 +369,56 @@ describe("Push endpoint", () => {
 
     expect(res.status).toBe(201)
   })
+
+  it("replays identical idempotent push requests", async () => {
+    const request = JSON.stringify({ content: "dedupe me" })
+    const first = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": "push-key",
+      },
+      body: request,
+    }, env)
+    const second = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": "push-key",
+      },
+      body: request,
+    }, env)
+
+    expect(first.status).toBe(201)
+    expect(second.status).toBe(201)
+    expect(second.headers.get("X-Idempotency-Replayed")).toBe("true")
+
+    const firstBody = await first.json() as JsonResponse
+    const secondBody = await second.json() as JsonResponse
+    expect(secondBody.id).toBe(firstBody.id)
+  })
+
+  it("rejects conflicting idempotent push requests", async () => {
+    await app.request("/api/v1/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": "push-conflict",
+      },
+      body: JSON.stringify({ content: "first" }),
+    }, env)
+
+    const res = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": "push-conflict",
+      },
+      body: JSON.stringify({ content: "second" }),
+    }, env)
+
+    expect(res.status).toBe(409)
+  })
 })
 
 describe("Get content endpoints", () => {
@@ -577,16 +636,34 @@ describe("Multipart uploads", () => {
     expect(initRes.status).toBe(200)
     const init = await initRes.json() as JsonResponse
     const uploadId = init.uploadId as string
+    const resumeToken = init.resumeToken as string
+    expect(init.partSize).toBe(50 * 1024 * 1024)
+    expect(init.statusUrl).toContain("/api/v1/multipart/archive_bundle/status")
 
+    const checksum = await sha256Hex("hello")
     const partRes = await app.request("/api/v1/multipart/archive_bundle/part/1", {
       method: "PUT",
       headers: {
         "X-Upload-Id": uploadId,
+        "X-Part-SHA256": checksum,
       },
       body: "hello",
     }, env)
 
     expect(partRes.status).toBe(200)
+
+    const statusRes = await app.request("/api/v1/multipart/archive_bundle/status", {
+      headers: {
+        "X-Upload-Id": uploadId,
+        "X-Resume-Token": resumeToken,
+      },
+    }, env)
+
+    expect(statusRes.status).toBe(200)
+    const statusBody = await statusRes.json() as JsonResponse
+    expect(statusBody.uploadedParts).toEqual([
+      { partNumber: 1, etag: `${uploadId}-1`, sha256: checksum, size: 5 },
+    ])
 
     const completeRes = await app.request("/api/v1/multipart/archive_bundle/complete", {
       method: "POST",
@@ -602,6 +679,114 @@ describe("Multipart uploads", () => {
 
     const rawRes = await app.request("/archive_bundle/raw", {}, env)
     expect(await rawRes.text()).toBe("hello")
+  })
+
+  it("deduplicates identical multipart part retries and rejects checksum conflicts", async () => {
+    const initRes = await app.request("/api/v1/multipart/init", {
+      method: "POST",
+      headers: {
+        "X-Content-Type": "application/octet-stream",
+      },
+    }, env)
+    const init = await initRes.json() as JsonResponse
+    const uploadId = init.uploadId as string
+    const id = init.id as string
+    const checksum = await sha256Hex("hello")
+
+    const first = await app.request(`/api/v1/multipart/${id}/part/1`, {
+      method: "PUT",
+      headers: {
+        "X-Upload-Id": uploadId,
+        "X-Part-SHA256": checksum,
+      },
+      body: "hello",
+    }, env)
+    const second = await app.request(`/api/v1/multipart/${id}/part/1`, {
+      method: "PUT",
+      headers: {
+        "X-Upload-Id": uploadId,
+        "X-Part-SHA256": checksum,
+      },
+      body: "hello",
+    }, env)
+    const conflict = await app.request(`/api/v1/multipart/${id}/part/1`, {
+      method: "PUT",
+      headers: {
+        "X-Upload-Id": uploadId,
+        "X-Part-SHA256": await sha256Hex("world"),
+      },
+      body: "world",
+    }, env)
+
+    expect(first.status).toBe(200)
+    expect(second.status).toBe(200)
+    expect(conflict.status).toBe(409)
+  })
+
+  it("aborts multipart uploads with the resume token", async () => {
+    const initRes = await app.request("/api/v1/multipart/init", {
+      method: "POST",
+      headers: {
+        "X-Content-Type": "application/octet-stream",
+      },
+    }, env)
+    const init = await initRes.json() as JsonResponse
+
+    const abortRes = await app.request(`/api/v1/multipart/${init.id}`, {
+      method: "DELETE",
+      headers: {
+        "X-Upload-Id": init.uploadId as string,
+        "X-Resume-Token": init.resumeToken as string,
+      },
+    }, env)
+
+    expect(abortRes.status).toBe(200)
+
+    const statusRes = await app.request(`/api/v1/multipart/${init.id}/status`, {
+      headers: {
+        "X-Upload-Id": init.uploadId as string,
+        "X-Resume-Token": init.resumeToken as string,
+      },
+    }, env)
+
+    expect(statusRes.status).toBe(404)
+  })
+})
+
+describe("Stats endpoints", () => {
+  it("reports aggregate upload and read metrics", async () => {
+    const env = createMockEnv()
+    const createRes = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "{\"ok\":true}",
+        contentType: "application/json",
+      }),
+    }, env)
+    const created = await createRes.json() as JsonResponse
+    await app.request(`/${created.id}/meta`, {}, env)
+    await app.request(`/${created.id}/raw`, {}, env)
+    await app.request("/missing/raw", {}, env)
+
+    const summaryRes = await app.request("/api/v1/stats/summary?window=24h", {}, env)
+    const summary = await summaryRes.json() as JsonResponse
+    expect(summary.uploadsTotal).toBe(1)
+    expect(summary.uploadsInline).toBe(1)
+    expect(summary.readsMeta).toBe(1)
+    expect(summary.readsRaw).toBe(1)
+    expect(summary.notFound).toBe(1)
+
+    const contentTypesRes = await app.request("/api/v1/stats/content-types?window=24h&limit=5", {}, env)
+    const contentTypes = await contentTypesRes.json() as JsonResponse
+    expect(contentTypes.items).toEqual([
+      { contentType: "application/json", uploads: 1, bytes: 11 },
+    ])
+
+    const storageRes = await app.request("/api/v1/stats/storage", {}, env)
+    const storage = await storageRes.json() as JsonResponse
+    expect(storage.latestSnapshot).toBeNull()
+    expect(storage.series).toEqual([])
   })
 })
 

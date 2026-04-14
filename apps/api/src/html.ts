@@ -381,9 +381,6 @@ function baseStyles(): string {
       margin: 0 auto 0.75rem;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    #content { display: none; }
-    #loading { display: block; }
-    #error { display: none; }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(113,113,122,0.3); }
@@ -680,7 +677,11 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   ${faviconLink(metadata.id)}
   ${fonts()}
-  <style>${baseStyles()}</style>
+  <style>${baseStyles()}
+    #content { display: none; }
+    #loading { display: block; }
+    #error { display: none; }
+  </style>
 </head>
 <body>
   <div class="wrap">

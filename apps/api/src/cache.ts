@@ -17,7 +17,10 @@ export async function runAsync(ctx: ExecutionContext | undefined, promise: Promi
 export async function getFromCacheOrFetch(
   request: Request,
   ctx: ExecutionContext | undefined,
-  fetchFn: () => Promise<Response>
+  fetchFn: () => Promise<Response>,
+  handlers?: {
+    onHit?: (response: Response) => Promise<void> | void
+  }
 ): Promise<Response> {
   if (typeof caches === "undefined") {
     return fetchFn()
@@ -28,6 +31,7 @@ export async function getFromCacheOrFetch(
 
   const cached = await cache.match(cacheKey)
   if (cached) {
+    await handlers?.onHit?.(cached.clone())
     return cached
   }
 

@@ -3,9 +3,11 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use futures::stream::{self, StreamExt};
+use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::Body;
+use reqwest::{Body, StatusCode};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+use ring::digest::{digest, SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read};
@@ -16,6 +18,7 @@ const DEFAULT_BASE_URL: &str = "https://shrd.stoff.dev";
 const KEY_LEN: usize = 32;
 const GENERATED_ID_LEN: usize = 6;
 const MAX_HISTORY_ITEMS: usize = 50;
+const INLINE_STORAGE_LIMIT: usize = 25 * 1024;
 const ROOT_AFTER_HELP: &str = "Examples:\n  shrd \"hello world\"\n  shrd notes.txt\n  cat deploy.log | shrd --mode temporary\n  shrd get last\n  shrd list\n";
 const UPLOAD_AFTER_HELP: &str = "Examples:\n  shrd upload notes.txt\n  shrd upload --mode private secrets.txt\n  cat deploy.log | shrd upload --expire 1h\n  shrd upload --name release-notes README.md\n";
 const GET_AFTER_HELP: &str = "Examples:\n  shrd get abc123\n  shrd get last\n  shrd get https://shrd.stoff.dev/release-notes#key=secret\n  shrd get abc123 --meta\n";
@@ -150,6 +153,35 @@ enum ShareMode {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum HistoryModeFilter {
+    Temporary,
+    Private,
+    Permanent,
+    Default,
+    Encrypted,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum HistoryKind {
+    Text,
+    Json,
+    Markdown,
+    Image,
+    Audio,
+    Video,
+    Binary,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum HistorySourceFilter {
+    Inline,
+    Stdin,
+    Clipboard,
+    Path,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum AiTool {
     Cursor,
     Codex,
@@ -196,6 +228,9 @@ struct UploadOptions {
 
     #[arg(short, long, help = "Share clipboard contents")]
     clipboard: bool,
+
+    #[arg(long, help = "Resume a failed multipart upload from a manifest path")]
+    resume: Option<String>,
 }
 
 #[derive(Debug, Args, Clone, Default)]
@@ -205,6 +240,22 @@ struct GetOptions {
 
     #[arg(short, long, help = "Suppress output except errors")]
     quiet: bool,
+
+    #[arg(long, help = "Write exact bytes to stdout")]
+    raw: bool,
+
+    #[arg(
+        short = 'o',
+        long,
+        help = "Write to a file path, directory, or '-' for stdout"
+    )]
+    output: Option<String>,
+
+    #[arg(long, help = "Open the fetched content with the default app")]
+    open: bool,
+
+    #[arg(long, help = "Copy fetched text content to the clipboard")]
+    copy: bool,
 }
 
 #[derive(Debug, Args, Clone, Default)]
@@ -217,6 +268,24 @@ struct ListOptions {
 
     #[arg(short, long, help = "Output as JSON")]
     json: bool,
+
+    #[arg(long, help = "Fuzzy-match recent shares")]
+    query: Option<String>,
+
+    #[arg(long, help = "Filter by exact share name")]
+    name: Option<String>,
+
+    #[arg(long, value_enum, help = "Filter by mode")]
+    mode: Option<HistoryModeFilter>,
+
+    #[arg(long = "type", value_enum, help = "Filter by content kind")]
+    kind: Option<HistoryKind>,
+
+    #[arg(long, value_enum, help = "Filter by source")]
+    source: Option<HistorySourceFilter>,
+
+    #[arg(long, help = "Filter by age like 15m, 1h, 7d")]
+    age: Option<String>,
 }
 
 #[derive(Debug, Args, Clone, Default)]
@@ -271,6 +340,14 @@ enum Commands {
         after_help = LIST_AFTER_HELP
     )]
     List {
+        #[command(flatten)]
+        options: ListOptions,
+    },
+    #[command(about = "Search local share history", after_help = LIST_AFTER_HELP)]
+    Search {
+        #[arg(help = "Search query")]
+        term: String,
+
         #[command(flatten)]
         options: ListOptions,
     },
@@ -420,20 +497,107 @@ struct ShareMeta {
     encrypted: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 struct HistoryEntry {
+    #[serde(default)]
     id: String,
+    #[serde(default)]
     url: String,
+    #[serde(default)]
     raw_url: String,
+    #[serde(default)]
     delete_url: String,
+    #[serde(default)]
     delete_token: String,
+    #[serde(default)]
     expires_at: Option<String>,
+    #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    kind: Option<HistoryKind>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    storage_type: Option<String>,
+    #[serde(default)]
     created_at: u64,
+    #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
     mode: Option<String>,
+    #[serde(default)]
     encrypted: bool,
+    #[serde(default)]
     burn: bool,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct HistoryFile {
+    version: u8,
+    entries: Vec<HistoryEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HistoryOnDisk {
+    V1(Vec<HistoryEntry>),
+    V2(HistoryFile),
+}
+
+#[derive(Deserialize)]
+struct MultipartInitResponse {
+    id: String,
+    #[serde(rename = "uploadId")]
+    upload_id: String,
+    #[serde(rename = "resumeToken")]
+    resume_token: String,
+    #[serde(rename = "partSize")]
+    part_size: u64,
+}
+
+#[derive(Deserialize)]
+struct MultipartStatusResponse {
+    #[serde(rename = "uploadedParts")]
+    uploaded_parts: Vec<MultipartUploadedPart>,
+    #[serde(rename = "partSize")]
+    part_size: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct MultipartUploadedPart {
+    #[serde(rename = "partNumber")]
+    part_number: u64,
+    etag: String,
+    sha256: String,
+    size: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MultipartResumeManifest {
+    file_path: String,
+    file_size: u64,
+    base_url: String,
+    share_id: String,
+    upload_id: String,
+    resume_token: String,
+    part_size: u64,
+    uploaded_parts: Vec<MultipartUploadedPart>,
+    idempotency_key: String,
+    filename: String,
+    content_type: String,
+    encryption_key: Option<String>,
+    created_at: u64,
+}
+
+#[derive(Deserialize)]
+struct MultipartPartUploadResponse {
+    #[serde(rename = "partNumber")]
+    part_number: u64,
+    etag: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -493,13 +657,23 @@ fn load_history() -> Result<Vec<HistoryEntry>> {
     }
 
     let content = std::fs::read_to_string(history_file)?;
-    let entries = serde_json::from_str(&content).unwrap_or_default();
-    Ok(entries)
+    let parsed: HistoryOnDisk =
+        serde_json::from_str(&content).unwrap_or(HistoryOnDisk::V1(Vec::new()));
+    Ok(match parsed {
+        HistoryOnDisk::V1(entries) => entries,
+        HistoryOnDisk::V2(file) => file.entries,
+    })
 }
 
 fn save_history(entries: &[HistoryEntry]) -> Result<()> {
     let history_file = history_file_path()?;
-    std::fs::write(history_file, serde_json::to_string_pretty(entries)?)?;
+    std::fs::write(
+        history_file,
+        serde_json::to_string_pretty(&HistoryFile {
+            version: 2,
+            entries: entries.to_vec(),
+        })?,
+    )?;
     Ok(())
 }
 
@@ -533,10 +707,38 @@ fn mode_label(mode: ShareMode) -> &'static str {
     }
 }
 
+fn history_mode_label(options: &UploadOptions) -> String {
+    if let Some(mode) = effective_mode(options) {
+        return mode_label(mode).to_string();
+    }
+
+    if effective_encrypt(options) {
+        return "encrypted".to_string();
+    }
+
+    "default".to_string()
+}
+
+fn infer_history_kind(content_type: &str) -> HistoryKind {
+    match content_type {
+        "application/json" => HistoryKind::Json,
+        "text/markdown" => HistoryKind::Markdown,
+        _ if content_type.starts_with("image/") => HistoryKind::Image,
+        _ if content_type.starts_with("audio/") => HistoryKind::Audio,
+        _ if content_type.starts_with("video/") => HistoryKind::Video,
+        _ if content_type.starts_with("text/") => HistoryKind::Text,
+        _ => HistoryKind::Binary,
+    }
+}
+
 fn root_get_options(cli: &Cli) -> GetOptions {
     GetOptions {
         meta: cli.meta,
         quiet: cli.upload.quiet,
+        raw: false,
+        output: None,
+        open: false,
+        copy: false,
     }
 }
 
@@ -988,6 +1190,292 @@ fn get_clipboard() -> Result<String> {
     anyhow::bail!("Clipboard support not compiled in")
 }
 
+fn generate_idempotency_key() -> Result<String> {
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 24];
+    rng.fill(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("Failed to generate idempotency key"))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>()
+}
+
+fn should_retry_status(status: StatusCode, response: &reqwest::Response) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_EARLY
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    ) || (status == StatusCode::CONFLICT && response.headers().get("Retry-After").is_some())
+        || status.is_server_error()
+}
+
+async fn retry_delay(attempt: usize) {
+    let jitter = (unix_now() % 250) + 50;
+    let base_ms = 150u64.saturating_mul(1u64 << attempt.min(5));
+    tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter)).await;
+}
+
+async fn send_with_retry<F>(mut make_request: F, attempts: usize) -> Result<reqwest::Response>
+where
+    F: FnMut() -> reqwest::RequestBuilder,
+{
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for attempt in 0..attempts {
+        match make_request().send().await {
+            Ok(response)
+                if should_retry_status(response.status(), &response) && attempt + 1 < attempts =>
+            {
+                retry_delay(attempt).await;
+                continue;
+            }
+            Ok(response) => return Ok(response),
+            Err(error) if attempt + 1 < attempts => {
+                last_error = Some(error.into());
+                retry_delay(attempt).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("request failed")))
+}
+
+fn uploads_dir() -> Result<PathBuf> {
+    let dir = get_config_dir()?.join("uploads");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn manifest_path_for_upload(id: &str) -> Result<PathBuf> {
+    Ok(uploads_dir()?.join(format!("{}.json", id)))
+}
+
+fn write_resume_manifest(manifest_path: &Path, manifest: &MultipartResumeManifest) -> Result<()> {
+    std::fs::write(manifest_path, serde_json::to_string_pretty(manifest)?)?;
+    Ok(())
+}
+
+fn read_resume_manifest(path: &str) -> Result<MultipartResumeManifest> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read manifest: {}", path))?;
+    Ok(serde_json::from_str(&content)?)
+}
+
+fn parse_age_filter(value: &str) -> Result<u64> {
+    let trimmed = value.trim();
+    if trimmed.len() < 2 {
+        anyhow::bail!("Invalid age filter");
+    }
+    let (amount, unit) = trimmed.split_at(trimmed.len() - 1);
+    let parsed = amount.parse::<u64>().context("Invalid age filter")?;
+    let seconds = match unit {
+        "m" => parsed * 60,
+        "h" => parsed * 60 * 60,
+        "d" => parsed * 24 * 60 * 60,
+        _ => anyhow::bail!("Invalid age filter"),
+    };
+    Ok(seconds)
+}
+
+fn history_source_label(source: Option<&str>) -> Option<String> {
+    match source {
+        Some("inline") => Some("inline".to_string()),
+        Some("stdin") => Some("stdin".to_string()),
+        Some("clipboard") => Some("clipboard".to_string()),
+        Some(_) => Some("path".to_string()),
+        None => None,
+    }
+}
+
+fn matches_history_mode(entry: &HistoryEntry, filter: HistoryModeFilter) -> bool {
+    let mode = entry.mode.as_deref().unwrap_or("default");
+    match filter {
+        HistoryModeFilter::Temporary => mode == "temporary",
+        HistoryModeFilter::Private => mode == "private",
+        HistoryModeFilter::Permanent => mode == "permanent",
+        HistoryModeFilter::Default => mode == "default",
+        HistoryModeFilter::Encrypted => mode == "encrypted",
+    }
+}
+
+fn matches_history_source(entry: &HistoryEntry, filter: HistorySourceFilter) -> bool {
+    let source = entry.source.as_deref().unwrap_or("inline");
+    match filter {
+        HistorySourceFilter::Inline => source == "inline",
+        HistorySourceFilter::Stdin => source == "stdin",
+        HistorySourceFilter::Clipboard => source == "clipboard",
+        HistorySourceFilter::Path => source == "path",
+    }
+}
+
+fn history_match_score(entry: &HistoryEntry, query: &str) -> Option<i64> {
+    let matcher = SkimMatcherV2::default();
+    [
+        entry.id.as_str(),
+        entry.name.as_deref().unwrap_or_default(),
+        entry.filename.as_deref().unwrap_or_default(),
+        entry.url.as_str(),
+        entry.source.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .filter_map(|value| matcher.fuzzy_match(value, query))
+    .max()
+}
+
+fn filter_history_entries(
+    entries: Vec<HistoryEntry>,
+    options: &ListOptions,
+) -> Result<Vec<HistoryEntry>> {
+    let max_age = options.age.as_deref().map(parse_age_filter).transpose()?;
+    let now = unix_now();
+    let mut filtered = entries
+        .into_iter()
+        .filter(|entry| {
+            options
+                .name
+                .as_deref()
+                .map(|name| entry.name.as_deref() == Some(name))
+                .unwrap_or(true)
+        })
+        .filter(|entry| {
+            options
+                .mode
+                .map(|mode| matches_history_mode(entry, mode))
+                .unwrap_or(true)
+        })
+        .filter(|entry| {
+            options
+                .kind
+                .map(|kind| entry.kind == Some(kind))
+                .unwrap_or(true)
+        })
+        .filter(|entry| {
+            options
+                .source
+                .map(|source| matches_history_source(entry, source))
+                .unwrap_or(true)
+        })
+        .filter(|entry| {
+            max_age
+                .map(|age| now.saturating_sub(entry.created_at) <= age)
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(query) = options.query.as_deref() {
+        let mut scored = filtered
+            .drain(..)
+            .filter_map(|entry| history_match_score(&entry, query).map(|score| (score, entry)))
+            .collect::<Vec<_>>();
+        scored.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.created_at.cmp(&left.1.created_at))
+        });
+        filtered = scored.into_iter().map(|(_, entry)| entry).collect();
+    }
+
+    Ok(filtered)
+}
+
+fn preferred_filename(meta: &ShareMeta, id: &str) -> String {
+    if let Some(filename) = meta.filename.as_deref() {
+        return filename.to_string();
+    }
+
+    if let Some(name) = meta.name.as_deref() {
+        return name.to_string();
+    }
+
+    let extension = if is_binary_content_type(&meta.content_type) {
+        "bin"
+    } else {
+        "txt"
+    };
+    format!("{}.{}", id, extension)
+}
+
+enum OutputTarget {
+    Stdout,
+    File(PathBuf),
+}
+
+fn resolve_output_target(
+    meta: &ShareMeta,
+    id: &str,
+    output: Option<&str>,
+) -> Result<Option<OutputTarget>> {
+    let Some(output) = output else {
+        return Ok(None);
+    };
+
+    if output == "-" {
+        return Ok(Some(OutputTarget::Stdout));
+    }
+
+    let path = PathBuf::from(output);
+    let final_path = if path.is_dir() {
+        path.join(preferred_filename(meta, id))
+    } else {
+        path
+    };
+
+    if final_path.exists() {
+        anyhow::bail!("Output path already exists: {}", final_path.display());
+    }
+
+    Ok(Some(OutputTarget::File(final_path)))
+}
+
+fn temp_output_path(meta: &ShareMeta, id: &str) -> PathBuf {
+    let unique = unix_now();
+    std::env::temp_dir().join(format!("{}-{}", unique, preferred_filename(meta, id)))
+}
+
+fn upload_progress_bar(total: u64, options: &UploadOptions) -> Option<ProgressBar> {
+    let upload_speed = get_upload_speed();
+    let estimated_seconds = total as f64 / upload_speed;
+    if estimated_seconds <= 10.0 || options.quiet || options.json {
+        return None;
+    }
+
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
+            .unwrap()
+            .progress_chars("━━─"),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    Some(pb)
+}
+
+fn body_from_bytes(bytes: Vec<u8>, progress_bar: Option<ProgressBar>) -> Body {
+    if let Some(pb) = progress_bar {
+        let pb_clone = pb.clone();
+        let chunks: Vec<Vec<u8>> = bytes.chunks(8192).map(|chunk| chunk.to_vec()).collect();
+        let stream = stream::iter(chunks).map(move |chunk| {
+            pb_clone.inc(chunk.len() as u64);
+            Ok::<_, std::io::Error>(chunk)
+        });
+        Body::wrap_stream(stream)
+    } else {
+        Body::from(bytes)
+    }
+}
+
 async fn push_content(
     options: &UploadOptions,
     content: String,
@@ -997,80 +1485,56 @@ async fn push_content(
 ) -> Result<()> {
     let client = reqwest::Client::new();
     let base_url = get_base_url();
-
     let encrypt = effective_encrypt(options);
     let burn = effective_burn(options);
     let expire = effective_expire(options);
+    let idempotency_key = generate_idempotency_key()?;
+    let source_label = history_source_label(source.as_deref());
 
     let (final_content, encryption_key) = if encrypt {
         let (encrypted_content, key) = encrypt_content(content.as_bytes())?;
-        let encoded_content = base64::engine::general_purpose::STANDARD.encode(&encrypted_content);
-        (encoded_content, Some(key))
+        (
+            base64::engine::general_purpose::STANDARD.encode(&encrypted_content),
+            Some(key),
+        )
     } else {
         (content, None)
     };
 
     let request = PushRequest {
-        content: final_content,
+        content: final_content.clone(),
         expire,
         burn,
         name: options.name.clone(),
-        content_type,
-        filename,
+        content_type: content_type.clone(),
+        filename: filename.clone(),
         encrypted: encrypt,
     };
 
     let body_bytes = serde_json::to_vec(&request)?;
-    let body_size = body_bytes.len();
-
-    let upload_speed = get_upload_speed();
-    let estimated_seconds = body_size as f64 / upload_speed;
-    let show_progress = estimated_seconds > 10.0 && !options.quiet && !options.json;
-
-    let progress_bar = if show_progress {
-        let pb = ProgressBar::new(body_size as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
-                .unwrap()
-                .progress_chars("━━─"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        Some(pb)
-    } else {
-        None
-    };
-
+    let progress_bar = upload_progress_bar(body_bytes.len() as u64, options);
     let start_time = Instant::now();
 
-    let body = if let Some(ref pb) = progress_bar {
-        let pb_clone = pb.clone();
-        let chunk_size = 8192;
-        let chunks: Vec<Vec<u8>> = body_bytes.chunks(chunk_size).map(|c| c.to_vec()).collect();
-
-        let stream = stream::iter(chunks).map(move |chunk| {
-            pb_clone.inc(chunk.len() as u64);
-            Ok::<_, std::io::Error>(chunk)
-        });
-
-        Body::wrap_stream(stream)
-    } else {
-        Body::from(body_bytes)
-    };
-
-    let req = client
-        .post(format!("{}/api/v1/push", base_url))
-        .header("Content-Type", "application/json");
-
-    let response = req.body(body).send().await?;
+    let response = send_with_retry(
+        || {
+            client
+                .post(format!("{}/api/v1/push", base_url))
+                .header("Content-Type", "application/json")
+                .header("X-Idempotency-Key", &idempotency_key)
+                .body(body_from_bytes(body_bytes.clone(), progress_bar.clone()))
+        },
+        5,
+    )
+    .await?;
 
     if let Some(pb) = progress_bar {
         pb.finish_and_clear();
     }
 
-    let elapsed = start_time.elapsed();
-    let actual_speed = body_size as f64 / elapsed.as_secs_f64();
-    save_upload_speed(actual_speed, body_size);
+    save_upload_speed(
+        body_bytes.len() as f64 / start_time.elapsed().as_secs_f64(),
+        body_bytes.len(),
+    );
 
     if !response.status().is_success() {
         let status = response.status();
@@ -1080,16 +1544,29 @@ async fn push_content(
 
     let result: PushResponse = response.json().await?;
     print_result(options, &result, encryption_key.as_deref());
-    let _ = record_history(options, &result, encryption_key.as_deref(), source);
+    let _ = record_history(
+        options,
+        &result,
+        encryption_key.as_deref(),
+        HistoryRecordInput {
+            source: source_label,
+            content_type: content_type.clone(),
+            filename,
+            size: Some(final_content.len() as u64),
+            storage_type: Some(if final_content.len() <= INLINE_STORAGE_LIMIT {
+                "kv".to_string()
+            } else {
+                "r2".to_string()
+            }),
+        },
+    );
 
     Ok(())
 }
 
-const MULTIPART_THRESHOLD: u64 = 95 * 1024 * 1024; // 95MB - use multipart for larger
-const PART_SIZE: u64 = 50 * 1024 * 1024; // 50MB parts
-
+const MULTIPART_THRESHOLD: u64 = 95 * 1024 * 1024;
 async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()> {
-    let path_obj = std::path::Path::new(path);
+    let path_obj = Path::new(path);
     let file_size = std::fs::metadata(path)
         .with_context(|| format!("Failed to read file: {}", path))?
         .len();
@@ -1100,16 +1577,15 @@ async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()
 
     let filename = path_obj
         .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
+        .and_then(|name| name.to_str())
+        .unwrap_or("file")
+        .to_string();
     let content_type = guess_content_type(path);
-
     let client = reqwest::Client::new();
     let base_url = get_base_url();
-
+    let idempotency_key = generate_idempotency_key()?;
     let file_content =
         std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
-
     let encrypt = effective_encrypt(options);
     let burn = effective_burn(options);
     let expire = effective_expire(options);
@@ -1122,70 +1598,48 @@ async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()
         (file_content, None, file_size)
     };
 
-    let upload_speed = get_upload_speed();
-    let estimated_seconds = content_size as f64 / upload_speed;
-    let show_progress = estimated_seconds > 10.0 && !options.quiet && !options.json;
-
-    let progress_bar = if show_progress {
-        let pb = ProgressBar::new(content_size);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
-                .unwrap()
-                .progress_chars("━━─"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        Some(pb)
-    } else {
-        None
-    };
-
+    let progress_bar = upload_progress_bar(content_size, options);
     let start_time = Instant::now();
+    let response = send_with_retry(
+        || {
+            let mut request = client
+                .post(format!("{}/api/v1/upload", base_url))
+                .header("Content-Length", content_size.to_string())
+                .header("X-Content-Type", &content_type)
+                .header("X-Filename", &filename)
+                .header("X-Idempotency-Key", &idempotency_key)
+                .body(body_from_bytes(
+                    upload_content.clone(),
+                    progress_bar.clone(),
+                ));
 
-    let body = if let Some(ref pb) = progress_bar {
-        let pb_clone = pb.clone();
-        let chunk_size = 8192;
-        let chunks: Vec<Vec<u8>> = upload_content
-            .chunks(chunk_size)
-            .map(|c| c.to_vec())
-            .collect();
-        let stream = stream::iter(chunks).map(move |chunk| {
-            pb_clone.inc(chunk.len() as u64);
-            Ok::<_, std::io::Error>(chunk)
-        });
-        Body::wrap_stream(stream)
-    } else {
-        Body::from(upload_content)
-    };
+            if burn {
+                request = request.header("X-Burn", "true");
+            }
+            if encrypt {
+                request = request.header("X-Encrypted", "true");
+            }
+            if let Some(ref expire) = expire {
+                request = request.header("X-Expire", expire);
+            }
+            if let Some(ref name) = options.name {
+                request = request.header("X-Name", name);
+            }
 
-    let mut req = client
-        .post(format!("{}/api/v1/upload", base_url))
-        .header("Content-Length", content_size.to_string())
-        .header("X-Content-Type", &content_type)
-        .header("X-Filename", filename);
-
-    if burn {
-        req = req.header("X-Burn", "true");
-    }
-    if encrypt {
-        req = req.header("X-Encrypted", "true");
-    }
-    if let Some(ref expire) = expire {
-        req = req.header("X-Expire", expire);
-    }
-    if let Some(ref name) = options.name {
-        req = req.header("X-Name", name);
-    }
-
-    let response = req.body(body).send().await?;
+            request
+        },
+        5,
+    )
+    .await?;
 
     if let Some(pb) = progress_bar {
         pb.finish_and_clear();
     }
 
-    let elapsed = start_time.elapsed();
-    let actual_speed = content_size as f64 / elapsed.as_secs_f64();
-    save_upload_speed(actual_speed, content_size as usize);
+    save_upload_speed(
+        content_size as f64 / start_time.elapsed().as_secs_f64(),
+        content_size as usize,
+    );
 
     if !response.status().is_success() {
         let status = response.status();
@@ -1199,35 +1653,89 @@ async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()
         options,
         &result,
         encryption_key.as_deref(),
-        Some(path.to_string()),
+        HistoryRecordInput {
+            source: Some("path".to_string()),
+            content_type: Some(content_type),
+            filename: Some(filename),
+            size: Some(content_size),
+            storage_type: Some("r2".to_string()),
+        },
     );
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct MultipartInitResponse {
-    id: String,
-    #[serde(rename = "uploadId")]
-    upload_id: String,
+async fn finalize_multipart_upload(
+    client: &reqwest::Client,
+    base_url: &str,
+    options: &UploadOptions,
+    manifest_path: &Path,
+    manifest: &MultipartResumeManifest,
+    content_type: String,
+    filename: String,
+    content_size: u64,
+    encryption_key: Option<&str>,
+) -> Result<()> {
+    let complete_response = send_with_retry(
+        || {
+            client
+                .post(format!(
+                    "{}/api/v1/multipart/{}/complete",
+                    base_url, manifest.share_id
+                ))
+                .header("X-Upload-Id", &manifest.upload_id)
+                .header("X-Total-Size", content_size.to_string())
+                .header("X-Idempotency-Key", &manifest.idempotency_key)
+        },
+        5,
+    )
+    .await?;
+
+    if !complete_response.status().is_success() {
+        let status = complete_response.status();
+        let body = complete_response.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to complete multipart upload: {} - {}", status, body);
+    }
+
+    let result: PushResponse = complete_response.json().await?;
+    let _ = std::fs::remove_file(manifest_path);
+    if manifest
+        .file_path
+        .starts_with(&uploads_dir()?.display().to_string())
+    {
+        let _ = std::fs::remove_file(&manifest.file_path);
+    }
+    print_result(options, &result, encryption_key);
+    let _ = record_history(
+        options,
+        &result,
+        encryption_key,
+        HistoryRecordInput {
+            source: Some("path".to_string()),
+            content_type: Some(content_type),
+            filename: Some(filename),
+            size: Some(content_size),
+            storage_type: Some("r2".to_string()),
+        },
+    );
+    Ok(())
 }
 
 async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u64) -> Result<()> {
-    let path_obj = std::path::Path::new(path);
+    let path_obj = Path::new(path);
     let filename = path_obj
         .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
+        .and_then(|name| name.to_str())
+        .unwrap_or("file")
+        .to_string();
     let content_type = guess_content_type(path);
-
     let client = reqwest::Client::new();
     let base_url = get_base_url();
-
     let file_content =
         std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
-
     let encrypt = effective_encrypt(options);
     let burn = effective_burn(options);
     let expire = effective_expire(options);
+    let idempotency_key = generate_idempotency_key()?;
 
     let (upload_content, encryption_key, content_size) = if encrypt {
         let (encrypted, key) = encrypt_content(&file_content)?;
@@ -1237,25 +1745,30 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
         (file_content, None, file_size)
     };
 
-    let mut init_req = client
-        .post(format!("{}/api/v1/multipart/init", base_url))
-        .header("X-Content-Type", &content_type)
-        .header("X-Filename", filename);
+    let mut init_request = || {
+        let mut request = client
+            .post(format!("{}/api/v1/multipart/init", base_url))
+            .header("X-Content-Type", &content_type)
+            .header("X-Filename", &filename)
+            .header("X-Idempotency-Key", &idempotency_key);
 
-    if burn {
-        init_req = init_req.header("X-Burn", "true");
-    }
-    if encrypt {
-        init_req = init_req.header("X-Encrypted", "true");
-    }
-    if let Some(ref expire) = expire {
-        init_req = init_req.header("X-Expire", expire);
-    }
-    if let Some(ref name) = options.name {
-        init_req = init_req.header("X-Name", name);
-    }
+        if burn {
+            request = request.header("X-Burn", "true");
+        }
+        if encrypt {
+            request = request.header("X-Encrypted", "true");
+        }
+        if let Some(ref expire) = expire {
+            request = request.header("X-Expire", expire);
+        }
+        if let Some(ref name) = options.name {
+            request = request.header("X-Name", name);
+        }
 
-    let init_response = init_req.send().await?;
+        request
+    };
+
+    let init_response = send_with_retry(&mut init_request, 5).await?;
     if !init_response.status().is_success() {
         anyhow::bail!(
             "Failed to init multipart upload: {}",
@@ -1264,57 +1777,193 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
     }
 
     let init: MultipartInitResponse = init_response.json().await?;
-
-    let upload_speed = get_upload_speed();
-    let estimated_seconds = content_size as f64 / upload_speed;
-    let show_progress = estimated_seconds > 10.0 && !options.quiet && !options.json;
-
-    let progress_bar = if show_progress {
-        let pb = ProgressBar::new(content_size);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
-                .unwrap()
-                .progress_chars("━━─"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        Some(pb)
+    let manifest_path = manifest_path_for_upload(&init.id)?;
+    let payload_path = if encryption_key.is_some() {
+        let payload_path = uploads_dir()?.join(format!("{}.payload", init.id));
+        std::fs::write(&payload_path, &upload_content)?;
+        payload_path.to_string_lossy().to_string()
     } else {
-        None
+        path.to_string()
     };
+    let mut manifest = MultipartResumeManifest {
+        file_path: payload_path,
+        file_size: content_size,
+        base_url: base_url.clone(),
+        share_id: init.id.clone(),
+        upload_id: init.upload_id.clone(),
+        resume_token: init.resume_token.clone(),
+        part_size: init.part_size,
+        uploaded_parts: Vec::new(),
+        idempotency_key,
+        filename: filename.clone(),
+        content_type: content_type.clone(),
+        encryption_key: encryption_key.clone(),
+        created_at: unix_now(),
+    };
+    write_resume_manifest(&manifest_path, &manifest)?;
 
+    let progress_bar = upload_progress_bar(content_size, options);
     let start_time = Instant::now();
-    let mut part_number = 1;
     let mut uploaded = 0u64;
+    let mut part_number = 1u64;
 
     while uploaded < content_size {
-        let remaining = content_size - uploaded;
-        let part_size = std::cmp::min(PART_SIZE, remaining) as usize;
-        let part_data = upload_content[uploaded as usize..(uploaded as usize + part_size)].to_vec();
+        let part_size = std::cmp::min(init.part_size, content_size - uploaded) as usize;
+        let part_data = upload_content[uploaded as usize..uploaded as usize + part_size].to_vec();
+        let part_sha256 = sha256_hex(&part_data);
 
-        let body = if let Some(ref pb) = progress_bar {
-            let pb_clone = pb.clone();
-            let chunk_size = 8192;
-            let chunks: Vec<Vec<u8>> = part_data.chunks(chunk_size).map(|c| c.to_vec()).collect();
-            let stream = stream::iter(chunks).map(move |chunk| {
-                pb_clone.inc(chunk.len() as u64);
-                Ok::<_, std::io::Error>(chunk)
-            });
-            Body::wrap_stream(stream)
-        } else {
-            Body::from(part_data)
-        };
+        let response = send_with_retry(
+            || {
+                client
+                    .put(format!(
+                        "{}/api/v1/multipart/{}/part/{}",
+                        base_url, init.id, part_number
+                    ))
+                    .header("X-Upload-Id", &init.upload_id)
+                    .header("X-Part-SHA256", &part_sha256)
+                    .header("Content-Length", part_size.to_string())
+                    .body(body_from_bytes(part_data.clone(), progress_bar.clone()))
+            },
+            3,
+        )
+        .await?;
 
-        let response = client
-            .put(format!(
-                "{}/api/v1/multipart/{}/part/{}",
-                base_url, init.id, part_number
-            ))
-            .header("X-Upload-Id", &init.upload_id)
-            .header("Content-Length", part_size.to_string())
-            .body(body)
-            .send()
-            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            eprintln!(
+                "{}",
+                format!(
+                    "resume with: shrd upload --resume {}",
+                    manifest_path.display()
+                )
+                .dimmed()
+            );
+            anyhow::bail!(
+                "Failed to upload part {}: {} - {}",
+                part_number,
+                status,
+                body
+            );
+        }
+
+        let uploaded_part: MultipartPartUploadResponse = response.json().await?;
+        manifest
+            .uploaded_parts
+            .retain(|entry| entry.part_number != uploaded_part.part_number);
+        manifest.uploaded_parts.push(MultipartUploadedPart {
+            part_number: uploaded_part.part_number,
+            etag: uploaded_part.etag,
+            sha256: part_sha256,
+            size: part_size as u64,
+        });
+        manifest
+            .uploaded_parts
+            .sort_by(|left, right| left.part_number.cmp(&right.part_number));
+        write_resume_manifest(&manifest_path, &manifest)?;
+
+        uploaded += part_size as u64;
+        part_number += 1;
+    }
+
+    if let Some(pb) = progress_bar {
+        pb.finish_and_clear();
+    }
+
+    save_upload_speed(
+        content_size as f64 / start_time.elapsed().as_secs_f64(),
+        content_size as usize,
+    );
+
+    finalize_multipart_upload(
+        &client,
+        &base_url,
+        options,
+        &manifest_path,
+        &manifest,
+        content_type,
+        filename,
+        content_size,
+        encryption_key.as_deref(),
+    )
+    .await
+}
+
+async fn resume_multipart_upload(options: &UploadOptions, manifest_path: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let mut manifest = read_resume_manifest(manifest_path)?;
+    let status_response = send_with_retry(
+        || {
+            client
+                .get(format!(
+                    "{}/api/v1/multipart/{}/status",
+                    manifest.base_url, manifest.share_id
+                ))
+                .header("X-Upload-Id", &manifest.upload_id)
+                .header("X-Resume-Token", &manifest.resume_token)
+        },
+        5,
+    )
+    .await?;
+
+    if !status_response.status().is_success() {
+        let status = status_response.status();
+        let body = status_response.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to resume multipart upload: {} - {}", status, body);
+    }
+
+    let status: MultipartStatusResponse = status_response.json().await?;
+    manifest.uploaded_parts = status.uploaded_parts;
+    manifest.part_size = status.part_size;
+    write_resume_manifest(Path::new(manifest_path), &manifest)?;
+
+    let path = manifest.file_path.clone();
+    let file_content =
+        std::fs::read(&path).with_context(|| format!("Failed to read file: {}", path))?;
+    let filename = manifest.filename.clone();
+    let content_type = manifest.content_type.clone();
+    let progress_bar = upload_progress_bar(manifest.file_size, options);
+    let uploaded_bytes = manifest
+        .uploaded_parts
+        .iter()
+        .map(|part| part.size)
+        .sum::<u64>();
+    if let Some(ref pb) = progress_bar {
+        pb.set_position(uploaded_bytes);
+    }
+
+    let mut uploaded = 0u64;
+    let mut part_number = 1u64;
+    while uploaded < manifest.file_size {
+        let part_size = std::cmp::min(status.part_size, manifest.file_size - uploaded) as usize;
+        let part_data = file_content[uploaded as usize..uploaded as usize + part_size].to_vec();
+        let part_sha256 = sha256_hex(&part_data);
+
+        if manifest
+            .uploaded_parts
+            .iter()
+            .any(|part| part.part_number == part_number && part.sha256 == part_sha256)
+        {
+            uploaded += part_size as u64;
+            part_number += 1;
+            continue;
+        }
+
+        let response = send_with_retry(
+            || {
+                client
+                    .put(format!(
+                        "{}/api/v1/multipart/{}/part/{}",
+                        manifest.base_url, manifest.share_id, part_number
+                    ))
+                    .header("X-Upload-Id", &manifest.upload_id)
+                    .header("X-Part-SHA256", &part_sha256)
+                    .header("Content-Length", part_size.to_string())
+                    .body(body_from_bytes(part_data.clone(), progress_bar.clone()))
+            },
+            3,
+        )
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1327,43 +1976,41 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
             );
         }
 
+        let uploaded_part: MultipartPartUploadResponse = response.json().await?;
+        manifest
+            .uploaded_parts
+            .retain(|entry| entry.part_number != uploaded_part.part_number);
+        manifest.uploaded_parts.push(MultipartUploadedPart {
+            part_number: uploaded_part.part_number,
+            etag: uploaded_part.etag,
+            sha256: part_sha256,
+            size: part_size as u64,
+        });
+        manifest
+            .uploaded_parts
+            .sort_by(|left, right| left.part_number.cmp(&right.part_number));
+        write_resume_manifest(Path::new(manifest_path), &manifest)?;
+
         uploaded += part_size as u64;
         part_number += 1;
     }
-
-    let complete_response = client
-        .post(format!(
-            "{}/api/v1/multipart/{}/complete",
-            base_url, init.id
-        ))
-        .header("X-Upload-Id", &init.upload_id)
-        .header("X-Total-Size", content_size.to_string())
-        .send()
-        .await?;
 
     if let Some(pb) = progress_bar {
         pb.finish_and_clear();
     }
 
-    let elapsed = start_time.elapsed();
-    let actual_speed = content_size as f64 / elapsed.as_secs_f64();
-    save_upload_speed(actual_speed, content_size as usize);
-
-    if !complete_response.status().is_success() {
-        let status = complete_response.status();
-        let body = complete_response.text().await.unwrap_or_default();
-        anyhow::bail!("Failed to complete multipart upload: {} - {}", status, body);
-    }
-
-    let result: PushResponse = complete_response.json().await?;
-    print_result(options, &result, encryption_key.as_deref());
-    let _ = record_history(
+    finalize_multipart_upload(
+        &client,
+        &manifest.base_url,
         options,
-        &result,
-        encryption_key.as_deref(),
-        Some(path.to_string()),
-    );
-    Ok(())
+        Path::new(manifest_path),
+        &manifest,
+        content_type,
+        filename,
+        manifest.file_size,
+        manifest.encryption_key.as_deref(),
+    )
+    .await
 }
 
 fn resolve_result_urls(result: &PushResponse, encryption_key: Option<&str>) -> (String, String) {
@@ -1398,13 +2045,22 @@ fn summarize_share(result: &PushResponse, options: &UploadOptions) -> String {
     labels.join(" · ")
 }
 
+struct HistoryRecordInput {
+    source: Option<String>,
+    content_type: Option<String>,
+    filename: Option<String>,
+    size: Option<u64>,
+    storage_type: Option<String>,
+}
+
 fn record_history(
     options: &UploadOptions,
     result: &PushResponse,
     encryption_key: Option<&str>,
-    source: Option<String>,
+    input: HistoryRecordInput,
 ) -> Result<()> {
     let (url, raw_url) = resolve_result_urls(result, encryption_key);
+    let content_type = input.content_type.clone();
     append_history(HistoryEntry {
         id: result.id.clone(),
         url,
@@ -1413,9 +2069,14 @@ fn record_history(
         delete_token: result.delete_token.clone(),
         expires_at: result.expires_at.clone(),
         name: result.name.clone(),
+        filename: input.filename,
+        content_type: content_type.clone(),
+        kind: content_type.as_deref().map(infer_history_kind),
+        size: input.size,
+        storage_type: input.storage_type,
         created_at: unix_now(),
-        source,
-        mode: effective_mode(options).map(|mode| mode_label(mode).to_string()),
+        source: input.source,
+        mode: Some(history_mode_label(options)),
         encrypted: effective_encrypt(options),
         burn: effective_burn(options),
     })
@@ -1515,10 +2176,16 @@ fn format_history_age(created_at: u64) -> String {
 }
 
 fn print_recent_shares(options: &ListOptions) -> Result<()> {
-    let entries = load_history()?;
+    let entries = filter_history_entries(load_history()?, options)?;
     if entries.is_empty() {
         if options.json {
-            println!("[]");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&HistoryFile {
+                    version: 2,
+                    entries: Vec::new(),
+                })?
+            );
         } else {
             println!("No recent shares yet.");
         }
@@ -1535,7 +2202,13 @@ fn print_recent_shares(options: &ListOptions) -> Result<()> {
     let shown_entries: Vec<HistoryEntry> = entries.into_iter().take(options.limit).collect();
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&shown_entries)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&HistoryFile {
+                version: 2,
+                entries: shown_entries,
+            })?
+        );
         return Ok(());
     }
 
@@ -1570,6 +2243,16 @@ fn print_recent_shares(options: &ListOptions) -> Result<()> {
 async fn pull_content(options: &GetOptions, id: &str) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
+    if options.raw && options.open {
+        anyhow::bail!("--raw cannot be used with --open");
+    }
+    if options.raw && options.copy {
+        anyhow::bail!("--raw cannot be used with --copy");
+    }
+    if options.open && options.copy {
+        anyhow::bail!("--open cannot be used with --copy");
+    }
+
     let client = reqwest::Client::new();
     let base_url = get_base_url();
     let resolved_reference = resolve_recent_reference(id)?;
@@ -1577,13 +2260,11 @@ async fn pull_content(options: &GetOptions, id: &str) -> Result<()> {
     let id = normalize_share_id(&raw_id);
 
     if options.meta {
-        let response = client
-            .get(format!("{}/{}/meta", base_url, id))
-            .send()
-            .await?;
+        let response =
+            send_with_retry(|| client.get(format!("{}/{}/meta", base_url, id)), 5).await?;
 
         if !response.status().is_success() {
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
+            if response.status() == StatusCode::NOT_FOUND {
                 anyhow::bail!("Share not found or expired");
             }
             anyhow::bail!("Failed to fetch: {}", response.status());
@@ -1594,13 +2275,10 @@ async fn pull_content(options: &GetOptions, id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let meta_response = client
-        .get(format!("{}/{}/meta", base_url, id))
-        .send()
-        .await?;
-
+    let meta_response =
+        send_with_retry(|| client.get(format!("{}/{}/meta", base_url, id)), 5).await?;
     if !meta_response.status().is_success() {
-        if meta_response.status() == reqwest::StatusCode::NOT_FOUND {
+        if meta_response.status() == StatusCode::NOT_FOUND {
             anyhow::bail!("Share not found or expired");
         }
         anyhow::bail!("Failed to fetch: {}", meta_response.status());
@@ -1609,23 +2287,17 @@ async fn pull_content(options: &GetOptions, id: &str) -> Result<()> {
     let meta: ShareMeta = meta_response.json().await?;
     let is_binary = is_binary_content_type(&meta.content_type);
     let is_tty = atty::is(atty::Stream::Stdout);
-    let is_encrypted = meta.encrypted.unwrap_or(false);
-
-    let response = client
-        .get(format!("{}/{}/raw", base_url, id))
-        .send()
-        .await?;
-
+    let response = send_with_retry(|| client.get(format!("{}/{}/raw", base_url, id)), 5).await?;
     if !response.status().is_success() {
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NOT_FOUND {
             anyhow::bail!("Share not found or expired");
         }
         anyhow::bail!("Failed to fetch: {}", response.status());
     }
 
-    if is_encrypted {
+    let content = if meta.encrypted.unwrap_or(false) {
         let key = decryption_key.context("Missing decryption key in share URL")?;
-        let decrypted = if meta.storage_type.as_deref() == Some("kv") {
+        if meta.storage_type.as_deref() == Some("kv") {
             let encoded = response.text().await?;
             let ciphertext = base64::engine::general_purpose::STANDARD
                 .decode(encoded.trim())
@@ -1634,95 +2306,56 @@ async fn pull_content(options: &GetOptions, id: &str) -> Result<()> {
         } else {
             let ciphertext = response.bytes().await?;
             decrypt_content(ciphertext.as_ref(), &key)?
-        };
+        }
+    } else {
+        response.bytes().await?.to_vec()
+    };
 
-        if is_binary && is_tty {
-            let default_filename = format!("{}.bin", id);
-            let filename = meta
-                .filename
-                .as_deref()
-                .or(meta.name.as_deref())
-                .unwrap_or(&default_filename);
-            let save_path = get_unique_filename(filename);
-            let mut file = tokio::fs::File::create(&save_path).await?;
-            file.write_all(&decrypted).await?;
-            file.flush().await?;
-
-            if !options.quiet {
-                println!("{} {}", "→".green(), save_path.cyan());
-            }
-            return Ok(());
+    if options.copy {
+        if is_binary {
+            anyhow::bail!("Cannot copy binary content. Use --output instead.");
         }
 
-        let mut stdout = tokio::io::stdout();
-        stdout.write_all(&decrypted).await?;
-        stdout.flush().await?;
+        let text = String::from_utf8(content).context("Fetched content is not valid UTF-8")?;
+        copy_to_clipboard(&text)?;
+        if !options.quiet {
+            println!("{}", "(copied to clipboard)".dimmed());
+        }
         return Ok(());
     }
 
-    let content_length = meta.size;
-    let upload_speed = get_upload_speed();
-    let estimated_seconds = content_length as f64 / upload_speed;
-    let show_progress = estimated_seconds > 10.0 && !options.quiet && is_tty;
-
-    let progress_bar = if show_progress {
-        let pb = ProgressBar::new(content_length);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} ({eta})")
-                .unwrap()
-                .progress_chars("━━─"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        Some(pb)
+    let explicit_output = resolve_output_target(&meta, &id, options.output.as_deref())?;
+    let target = if options.raw {
+        OutputTarget::Stdout
+    } else if let Some(target) = explicit_output {
+        target
+    } else if options.open {
+        OutputTarget::File(temp_output_path(&meta, &id))
+    } else if is_binary && is_tty {
+        OutputTarget::File(PathBuf::from(get_unique_filename(&preferred_filename(
+            &meta, &id,
+        ))))
     } else {
-        None
+        OutputTarget::Stdout
     };
 
-    if is_binary && is_tty {
-        let default_filename = format!("{}.bin", id);
-        let filename = meta
-            .filename
-            .as_deref()
-            .or(meta.name.as_deref())
-            .unwrap_or(&default_filename);
-        let save_path = get_unique_filename(filename);
-
-        let mut file = tokio::fs::File::create(&save_path).await?;
-        let mut stream = response.bytes_stream();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            if let Some(ref pb) = progress_bar {
-                pb.inc(chunk.len() as u64);
+    match target {
+        OutputTarget::Stdout => {
+            let mut stdout = tokio::io::stdout();
+            stdout.write_all(&content).await?;
+            stdout.flush().await?;
+        }
+        OutputTarget::File(path) => {
+            let mut file = tokio::fs::File::create(&path).await?;
+            file.write_all(&content).await?;
+            file.flush().await?;
+            if options.open {
+                opener::open(&path)?;
             }
-            file.write_all(&chunk).await?;
-        }
-
-        if let Some(pb) = progress_bar {
-            pb.finish_and_clear();
-        }
-
-        if !options.quiet {
-            println!("{} {}", "→".green(), save_path.cyan());
-        }
-    } else {
-        let mut stream = response.bytes_stream();
-        let mut stdout = tokio::io::stdout();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            if let Some(ref pb) = progress_bar {
-                pb.inc(chunk.len() as u64);
+            if !options.quiet {
+                println!("{} {}", "→".green(), path.display().to_string().cyan());
             }
-            stdout.write_all(&chunk).await?;
         }
-
-        if let Some(pb) = progress_bar {
-            pb.finish_and_clear();
-        }
-
-        stdout.flush().await?;
     }
 
     Ok(())
@@ -1733,6 +2366,10 @@ async fn upload_from_source(
     input: Option<&str>,
     explicit_upload: bool,
 ) -> Result<()> {
+    if let Some(manifest_path) = options.resume.as_deref() {
+        return resume_multipart_upload(options, manifest_path).await;
+    }
+
     if options.clipboard {
         let content = get_clipboard()?;
         return push_content(options, content, None, None, Some("clipboard".to_string())).await;
@@ -1812,6 +2449,11 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Get { id, options }) => return pull_content(options, id).await,
         Some(Commands::List { options }) => return print_recent_shares(options),
+        Some(Commands::Search { term, options }) => {
+            let mut search_options = options.clone();
+            search_options.query = Some(term.clone());
+            return print_recent_shares(&search_options);
+        }
         Some(Commands::Config { options, action }) => {
             match action {
                 ConfigAction::SetUrl { url } => {
@@ -2040,6 +2682,21 @@ mod tests {
     }
 
     #[test]
+    fn cli_supports_get_output_flags() {
+        let cli = Cli::try_parse_from(["shrd", "get", "last", "--raw", "--output", "-"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Get { id, options }) => {
+                assert_eq!(id, "last");
+                assert!(options.raw);
+                assert_eq!(options.output.as_deref(), Some("-"));
+            }
+            _ => panic!("expected get command"),
+        }
+    }
+
+    #[test]
     fn cli_supports_list_and_recent_alias() {
         let cli = Cli::try_parse_from(["shrd", "list", "--limit", "5"]).expect("cli should parse");
 
@@ -2055,6 +2712,29 @@ mod tests {
         match alias.command {
             Some(Commands::List { options }) => assert!(options.copy),
             _ => panic!("expected list command"),
+        }
+    }
+
+    #[test]
+    fn cli_supports_search_command() {
+        let cli = Cli::try_parse_from([
+            "shrd",
+            "search",
+            "deploy",
+            "--mode",
+            "temporary",
+            "--type",
+            "text",
+        ])
+        .expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Search { term, options }) => {
+                assert_eq!(term, "deploy");
+                assert_eq!(options.mode, Some(HistoryModeFilter::Temporary));
+                assert_eq!(options.kind, Some(HistoryKind::Text));
+            }
+            _ => panic!("expected search command"),
         }
     }
 

@@ -7,3 +7,4 @@ Canonical contract notes for this repo:
 - Share `name` is the public slug when provided. It must be unique, must avoid reserved route roots, and must work the same way for text push, direct upload, and multipart upload.
 - API responses and metadata should use `expiresAt: string | null`. `null` means no automatic expiry.
 - Metadata responses should keep `contentType`, `filename`, `encrypted`, `name`, and `storageType` available because the CLI and browser decryption flows depend on them.
+- Ignore `apps/web` unless the user explicitly asks for web app work. Treat this repo as CLI + API first by default.

@@ -20,6 +20,17 @@ export interface ContentMetadata {
   encrypted?: boolean
 }
 
+export type ShareKind = "text" | "json" | "markdown" | "binary" | "image"
+
+export interface CanonicalContentMetadata extends ContentMetadata {
+  type: ShareKind
+  burned: boolean
+  storageKey: string
+  inlineBody?: string | null
+  inlineBodyEncoding?: "utf8" | "base64" | null
+  lastAccessedAt?: string | null
+}
+
 export interface StoredContent {
   metadata: ContentMetadata
   content?: string
@@ -49,14 +60,17 @@ export interface PushResponse {
 export interface MultipartUploadSession {
   id: string
   uploadId: string
+  resumeToken: string
   deleteToken: string
   contentType: string
   filename?: string
   expire?: string
-  expiresIn?: number
+  ttlSeconds?: number | null
   burn?: boolean
   name?: string | null
   encrypted?: boolean
-  parts: { partNumber: number; etag: string }[]
+  partSize: number
+  expiresAt?: string | null
+  parts: { partNumber: number; etag: string; sha256: string; size: number }[]
   createdAt: string
 }
