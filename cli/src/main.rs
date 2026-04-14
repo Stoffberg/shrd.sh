@@ -10,7 +10,7 @@ use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use ring::digest::{digest, SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -24,11 +24,11 @@ const UPLOAD_AFTER_HELP: &str = "Examples:\n  shrd upload notes.txt\n  shrd uplo
 const GET_AFTER_HELP: &str = "Examples:\n  shrd get abc123\n  shrd get last\n  shrd get https://shrd.stoff.dev/release-notes#key=secret\n  shrd get abc123 --meta\n";
 const LIST_AFTER_HELP: &str =
     "Examples:\n  shrd list\n  shrd list --limit 20\n  shrd list --copy\n  shrd list --json\n";
-const CONFIG_AFTER_HELP: &str = "Examples:\n  shrd config show\n  shrd config set-url https://shrd.example.com\n  shrd config ai status\n  shrd config ai install codex\n";
+const CONFIG_AFTER_HELP: &str = "Examples:\n  shrd config show\n  shrd config set-url https://shrd.example.com\n  shrd config ai status\n  shrd config ai presets\n  shrd config ai install codex\n";
 const AI_INSTALL_AFTER_HELP: &str =
-    "Examples:\n  shrd config ai install codex\n  shrd config ai install claude\n  shrd config ai install all --force\n";
+    "Examples:\n  shrd config ai install\n  shrd config ai install codex\n  shrd config ai install --preset all --yes\n  shrd config ai install claude --force\n";
 const AI_REMOVE_AFTER_HELP: &str =
-    "Examples:\n  shrd config ai remove cursor\n  shrd config ai remove all --force\n";
+    "Examples:\n  shrd config ai remove cursor\n  shrd config ai remove --preset all --yes\n";
 
 fn encrypt_content(plaintext: &[u8]) -> Result<(Vec<u8>, String)> {
     let rng = SystemRandom::new();
@@ -189,6 +189,25 @@ enum AiTool {
     ClaudeCode,
     Opencode,
     All,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum AiPreset {
+    All,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+struct AiTargetOptions {
+    #[arg(value_enum, help = "Tool to configure", conflicts_with = "preset")]
+    tool: Option<AiTool>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Preset to configure",
+        conflicts_with = "tool"
+    )]
+    preset: Option<AiPreset>,
 }
 
 #[derive(Debug, Args, Clone, Default)]
@@ -383,23 +402,40 @@ enum AiConfigAction {
         after_help = AI_INSTALL_AFTER_HELP
     )]
     Install {
-        #[arg(value_enum, help = "Tool to configure")]
-        tool: AiTool,
+        #[command(flatten)]
+        target: AiTargetOptions,
         #[arg(long, help = "Replace customized skill directories")]
         force: bool,
+        #[arg(
+            short = 'y',
+            long,
+            help = "Skip confirmation when defaulting to all tools"
+        )]
+        yes: bool,
     },
     #[command(
         about = "Remove the shrd skill from a supported AI tool",
         after_help = AI_REMOVE_AFTER_HELP
     )]
     Remove {
-        #[arg(value_enum, help = "Tool to configure")]
-        tool: AiTool,
+        #[command(flatten)]
+        target: AiTargetOptions,
         #[arg(long, help = "Remove customized skill directories")]
         force: bool,
+        #[arg(
+            short = 'y',
+            long,
+            help = "Skip confirmation when defaulting to all tools"
+        )]
+        yes: bool,
     },
     #[command(about = "Show installed AI skill status")]
-    Status,
+    Status {
+        #[command(flatten)]
+        target: AiTargetOptions,
+    },
+    #[command(about = "List supported AI presets")]
+    Presets,
 }
 
 #[derive(Serialize)]
@@ -622,6 +658,13 @@ struct AiSkillStatus {
 }
 
 #[derive(Serialize)]
+struct AiPresetStatus {
+    preset: String,
+    tools: Vec<String>,
+    default: bool,
+}
+
+#[derive(Serialize)]
 struct ConfigSummary {
     #[serde(rename = "baseUrl")]
     base_url: String,
@@ -826,6 +869,25 @@ impl AiTool {
     }
 }
 
+impl AiPreset {
+    fn label(self) -> &'static str {
+        match self {
+            AiPreset::All => "all",
+        }
+    }
+
+    fn tools(self) -> Vec<AiTool> {
+        match self {
+            AiPreset::All => vec![
+                AiTool::Cursor,
+                AiTool::Codex,
+                AiTool::ClaudeCode,
+                AiTool::Opencode,
+            ],
+        }
+    }
+}
+
 impl AiSkillState {
     fn label(self) -> &'static str {
         match self {
@@ -836,22 +898,44 @@ impl AiSkillState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AiSelection {
+    Tool(AiTool),
+    Preset(AiPreset),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AiActionResult {
+    Installed,
+    Replaced,
+    AlreadyInstalled,
+    Removed,
+    Missing,
+}
+
+impl AiSelection {
+    fn label(self) -> &'static str {
+        match self {
+            AiSelection::Tool(tool) => tool.label(),
+            AiSelection::Preset(preset) => preset.label(),
+        }
+    }
+
+    fn tools(self) -> Vec<AiTool> {
+        match self {
+            AiSelection::Tool(tool) => vec![tool],
+            AiSelection::Preset(preset) => preset.tools(),
+        }
+    }
+}
+
 fn resolve_ai_skill_targets_from_roots(
     home_dir: &Path,
     xdg_config_home: &Path,
-    tool: AiTool,
+    selection: AiSelection,
 ) -> Vec<AiSkillTarget> {
-    let tools = match tool {
-        AiTool::All => vec![
-            AiTool::Cursor,
-            AiTool::Codex,
-            AiTool::ClaudeCode,
-            AiTool::Opencode,
-        ],
-        _ => vec![tool],
-    };
-
-    tools
+    selection
+        .tools()
         .into_iter()
         .map(|tool| {
             let skill_dir = match tool {
@@ -871,11 +955,11 @@ fn resolve_ai_skill_targets_from_roots(
         .collect()
 }
 
-fn resolve_ai_skill_targets(tool: AiTool) -> Result<Vec<AiSkillTarget>> {
+fn resolve_ai_skill_targets(selection: AiSelection) -> Result<Vec<AiSkillTarget>> {
     Ok(resolve_ai_skill_targets_from_roots(
         &get_home_dir()?,
         &get_xdg_config_home()?,
-        tool,
+        selection,
     ))
 }
 
@@ -910,8 +994,8 @@ fn ai_skill_state(target: &AiSkillTarget) -> Result<AiSkillState> {
     Ok(AiSkillState::Customized)
 }
 
-fn ai_skill_statuses(tool: AiTool) -> Result<Vec<AiSkillStatus>> {
-    let targets = resolve_ai_skill_targets(tool)?;
+fn ai_skill_statuses(selection: AiSelection) -> Result<Vec<AiSkillStatus>> {
+    let targets = resolve_ai_skill_targets(selection)?;
     targets
         .into_iter()
         .map(|target| {
@@ -925,10 +1009,80 @@ fn ai_skill_statuses(tool: AiTool) -> Result<Vec<AiSkillStatus>> {
         .collect()
 }
 
-fn install_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<()> {
+fn resolve_ai_selection(
+    target: &AiTargetOptions,
+    default_preset: Option<AiPreset>,
+) -> (AiSelection, bool) {
+    if let Some(tool) = target.tool {
+        if tool == AiTool::All {
+            return (AiSelection::Preset(AiPreset::All), true);
+        }
+        return (AiSelection::Tool(tool), true);
+    }
+
+    if let Some(preset) = target.preset {
+        return (AiSelection::Preset(preset), true);
+    }
+
+    (
+        AiSelection::Preset(default_preset.unwrap_or(AiPreset::All)),
+        false,
+    )
+}
+
+fn confirm_ai_default_selection(
+    action: &str,
+    selection: AiSelection,
+    json: bool,
+    yes: bool,
+    explicit: bool,
+) -> Result<()> {
+    if explicit || yes {
+        return Ok(());
+    }
+
+    if json {
+        anyhow::bail!(
+            "Refusing to default to preset '{}' in JSON mode. Re-run with --yes or choose a tool or --preset explicitly.",
+            selection.label()
+        );
+    }
+
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        anyhow::bail!(
+            "Refusing to default to preset '{}' without a terminal. Re-run with --yes or choose a tool or --preset explicitly.",
+            selection.label()
+        );
+    }
+
+    let targets = selection
+        .tools()
+        .into_iter()
+        .map(|tool| tool.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+    print!(
+        "About to {} the shrd skill for preset '{}' ({}) [y/N]: ",
+        action,
+        selection.label(),
+        targets
+    );
+    io::stdout().flush()?;
+
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let confirmed = matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if !confirmed {
+        anyhow::bail!("Aborted.");
+    }
+
+    Ok(())
+}
+
+fn install_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<AiActionResult> {
     let state = ai_skill_state(target)?;
     if state == AiSkillState::Installed {
-        return Ok(());
+        return Ok(AiActionResult::AlreadyInstalled);
     }
 
     if state == AiSkillState::Customized && !force {
@@ -945,12 +1099,16 @@ fn install_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<()> {
 
     std::fs::create_dir_all(&target.skill_dir)?;
     std::fs::write(&target.skill_file, canonical_shrd_skill())?;
-    Ok(())
+    Ok(if state == AiSkillState::Customized {
+        AiActionResult::Replaced
+    } else {
+        AiActionResult::Installed
+    })
 }
 
-fn remove_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<bool> {
+fn remove_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<AiActionResult> {
     if !target.skill_dir.exists() {
-        return Ok(false);
+        return Ok(AiActionResult::Missing);
     }
 
     let state = ai_skill_state(target)?;
@@ -963,11 +1121,18 @@ fn remove_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<bool> {
     }
 
     std::fs::remove_dir_all(&target.skill_dir)?;
-    Ok(true)
+    Ok(AiActionResult::Removed)
 }
 
-fn install_ai_skills(json: bool, tool: AiTool, force: bool) -> Result<()> {
-    let targets = resolve_ai_skill_targets(tool)?;
+fn install_ai_skills(
+    json: bool,
+    selection: AiSelection,
+    force: bool,
+    explicit: bool,
+    yes: bool,
+) -> Result<()> {
+    confirm_ai_default_selection("install", selection, json, yes, explicit)?;
+    let targets = resolve_ai_skill_targets(selection)?;
     for target in &targets {
         let state = ai_skill_state(target)?;
         if state == AiSkillState::Customized && !force {
@@ -979,26 +1144,40 @@ fn install_ai_skills(json: bool, tool: AiTool, force: bool) -> Result<()> {
         }
     }
 
-    for target in &targets {
-        install_ai_skill_target(target, force)?;
-    }
-
     let statuses: Vec<AiSkillStatus> = targets
-        .into_iter()
-        .map(|target| AiSkillStatus {
-            tool: target.tool.label().to_string(),
-            status: "installed".to_string(),
-            path: target.skill_file.display().to_string(),
+        .iter()
+        .map(|target| {
+            let result = install_ai_skill_target(target, force)?;
+            let status = match result {
+                AiActionResult::Installed => "installed",
+                AiActionResult::Replaced => "replaced",
+                AiActionResult::AlreadyInstalled => "already-installed",
+                _ => unreachable!(),
+            };
+
+            Ok(AiSkillStatus {
+                tool: target.tool.label().to_string(),
+                status: status.to_string(),
+                path: target.skill_file.display().to_string(),
+            })
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&statuses)?);
     } else {
+        println!("Configured shrd skill for {}", selection.label().cyan());
         for status in statuses {
+            let prefix = match status.status.as_str() {
+                "installed" => "✓".green(),
+                "replaced" => "↺".yellow(),
+                "already-installed" => "•".dimmed(),
+                _ => unreachable!(),
+            };
             println!(
-                "{} Installed shrd skill for {} at {}",
-                "✓".green(),
+                "{} {} for {} at {}",
+                prefix,
+                status.status.cyan(),
                 status.tool.cyan(),
                 status.path.dimmed()
             );
@@ -1008,8 +1187,15 @@ fn install_ai_skills(json: bool, tool: AiTool, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn remove_ai_skills(json: bool, tool: AiTool, force: bool) -> Result<()> {
-    let targets = resolve_ai_skill_targets(tool)?;
+fn remove_ai_skills(
+    json: bool,
+    selection: AiSelection,
+    force: bool,
+    explicit: bool,
+    yes: bool,
+) -> Result<()> {
+    confirm_ai_default_selection("remove", selection, json, yes, explicit)?;
+    let targets = resolve_ai_skill_targets(selection)?;
     let mut removed = Vec::new();
 
     for target in &targets {
@@ -1024,14 +1210,16 @@ fn remove_ai_skills(json: bool, tool: AiTool, force: bool) -> Result<()> {
     }
 
     for target in &targets {
-        let was_removed = remove_ai_skill_target(target, force)?;
+        let result = remove_ai_skill_target(target, force)?;
+        let status = match result {
+            AiActionResult::Removed => "removed",
+            AiActionResult::Missing => "missing",
+            _ => unreachable!(),
+        };
+
         removed.push(AiSkillStatus {
             tool: target.tool.label().to_string(),
-            status: if was_removed {
-                "removed".to_string()
-            } else {
-                "missing".to_string()
-            },
+            status: status.to_string(),
             path: target.skill_file.display().to_string(),
         });
     }
@@ -1039,39 +1227,69 @@ fn remove_ai_skills(json: bool, tool: AiTool, force: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&removed)?);
     } else {
+        println!(
+            "Configured shrd skill removal for {}",
+            selection.label().cyan()
+        );
         for status in removed {
-            if status.status == "removed" {
-                println!(
-                    "{} Removed shrd skill for {} from {}",
-                    "✓".green(),
-                    status.tool.cyan(),
-                    status.path.dimmed()
-                );
+            let prefix = if status.status == "removed" {
+                "✓".green()
             } else {
-                println!(
-                    "{} No shrd skill installed for {} at {}",
-                    "•".yellow(),
-                    status.tool.cyan(),
-                    status.path.dimmed()
-                );
-            }
+                "•".yellow()
+            };
+            println!(
+                "{} {} for {} at {}",
+                prefix,
+                status.status.cyan(),
+                status.tool.cyan(),
+                status.path.dimmed()
+            );
         }
     }
 
     Ok(())
 }
 
-fn print_ai_skill_status(json: bool, tool: AiTool) -> Result<()> {
-    let statuses = ai_skill_statuses(tool)?;
+fn print_ai_skill_status(json: bool, selection: AiSelection) -> Result<()> {
+    let statuses = ai_skill_statuses(selection)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&statuses)?);
         return Ok(());
     }
 
-    println!("{:<14} {:<12} {}", "tool", "status", "path");
+    println!("shrd AI skill status for {}", selection.label().cyan());
+    println!("{:<14} {:<18} {}", "tool", "status", "path");
     for status in statuses {
-        println!("{:<14} {:<12} {}", status.tool, status.status, status.path);
+        println!("{:<14} {:<18} {}", status.tool, status.status, status.path);
+    }
+
+    Ok(())
+}
+
+fn print_ai_presets(json: bool) -> Result<()> {
+    let presets = vec![AiPresetStatus {
+        preset: AiPreset::All.label().to_string(),
+        tools: AiPreset::All
+            .tools()
+            .into_iter()
+            .map(|tool| tool.label().to_string())
+            .collect(),
+        default: true,
+    }];
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&presets)?);
+    } else {
+        println!("{:<14} {:<7} tools", "preset", "default");
+        for preset in presets {
+            println!(
+                "{:<14} {:<7} {}",
+                preset.preset,
+                if preset.default { "yes" } else { "no" },
+                preset.tools.join(", ")
+            );
+        }
     }
 
     Ok(())
@@ -1081,7 +1299,7 @@ fn print_config_show(json: bool) -> Result<()> {
     let base_url = get_base_url();
     let config_dir = get_config_dir()?;
     let history_count = load_history().map(|entries| entries.len()).unwrap_or(0);
-    let ai_skills = ai_skill_statuses(AiTool::All)?;
+    let ai_skills = ai_skill_statuses(AiSelection::Preset(AiPreset::All))?;
 
     if json {
         let summary = ConfigSummary {
@@ -2461,14 +2679,22 @@ async fn main() -> Result<()> {
                     println!("{} Base URL set to: {}", "✓".green(), url.cyan());
                 }
                 ConfigAction::Ai { action } => match action {
-                    AiConfigAction::Install { tool, force } => {
-                        install_ai_skills(options.json, *tool, *force)?;
+                    AiConfigAction::Install { target, force, yes } => {
+                        let (selection, explicit) =
+                            resolve_ai_selection(target, Some(AiPreset::All));
+                        install_ai_skills(options.json, selection, *force, explicit, *yes)?;
                     }
-                    AiConfigAction::Remove { tool, force } => {
-                        remove_ai_skills(options.json, *tool, *force)?;
+                    AiConfigAction::Remove { target, force, yes } => {
+                        let (selection, explicit) =
+                            resolve_ai_selection(target, Some(AiPreset::All));
+                        remove_ai_skills(options.json, selection, *force, explicit, *yes)?;
                     }
-                    AiConfigAction::Status => {
-                        print_ai_skill_status(options.json, AiTool::All)?;
+                    AiConfigAction::Status { target } => {
+                        let (selection, _) = resolve_ai_selection(target, Some(AiPreset::All));
+                        print_ai_skill_status(options.json, selection)?;
+                    }
+                    AiConfigAction::Presets => {
+                        print_ai_presets(options.json)?;
                     }
                 },
                 ConfigAction::Show => {
@@ -2762,12 +2988,14 @@ mod tests {
                 options,
                 action:
                     ConfigAction::Ai {
-                        action: AiConfigAction::Install { tool, force },
+                        action: AiConfigAction::Install { target, force, yes },
                     },
             }) => {
                 assert!(!options.json);
-                assert_eq!(tool, AiTool::ClaudeCode);
+                assert_eq!(target.tool, Some(AiTool::ClaudeCode));
+                assert_eq!(target.preset, None);
                 assert!(!force);
+                assert!(!yes);
             }
             _ => panic!("expected config ai install command"),
         }
@@ -2782,10 +3010,71 @@ mod tests {
             Some(Commands::Config {
                 action:
                     ConfigAction::Ai {
-                        action: AiConfigAction::Install { tool, .. },
+                        action: AiConfigAction::Install { target, .. },
                     },
                 ..
-            }) => assert_eq!(tool, AiTool::ClaudeCode),
+            }) => assert_eq!(target.tool, Some(AiTool::ClaudeCode)),
+            _ => panic!("expected config ai install command"),
+        }
+    }
+
+    #[test]
+    fn cli_supports_config_ai_install_without_target() {
+        let cli =
+            Cli::try_parse_from(["shrd", "config", "ai", "install"]).expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Config {
+                action:
+                    ConfigAction::Ai {
+                        action: AiConfigAction::Install { target, yes, .. },
+                    },
+                ..
+            }) => {
+                assert_eq!(target.tool, None);
+                assert_eq!(target.preset, None);
+                assert!(!yes);
+            }
+            _ => panic!("expected config ai install command"),
+        }
+    }
+
+    #[test]
+    fn cli_supports_config_ai_install_with_preset() {
+        let cli = Cli::try_parse_from([
+            "shrd", "config", "ai", "install", "--preset", "all", "--yes",
+        ])
+        .expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Config {
+                action:
+                    ConfigAction::Ai {
+                        action: AiConfigAction::Install { target, yes, .. },
+                    },
+                ..
+            }) => {
+                assert_eq!(target.tool, None);
+                assert_eq!(target.preset, Some(AiPreset::All));
+                assert!(yes);
+            }
+            _ => panic!("expected config ai install command"),
+        }
+    }
+
+    #[test]
+    fn cli_keeps_legacy_all_target_for_ai_install() {
+        let cli = Cli::try_parse_from(["shrd", "config", "ai", "install", "all"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Config {
+                action:
+                    ConfigAction::Ai {
+                        action: AiConfigAction::Install { target, .. },
+                    },
+                ..
+            }) => assert_eq!(target.tool, Some(AiTool::All)),
             _ => panic!("expected config ai install command"),
         }
     }
@@ -2800,10 +3089,31 @@ mod tests {
                 options,
                 action:
                     ConfigAction::Ai {
-                        action: AiConfigAction::Status,
+                        action: AiConfigAction::Status { target },
                     },
-            }) => assert!(options.json),
+            }) => {
+                assert!(options.json);
+                assert_eq!(target.tool, None);
+                assert_eq!(target.preset, None);
+            }
             _ => panic!("expected config ai status command"),
+        }
+    }
+
+    #[test]
+    fn cli_supports_config_ai_presets() {
+        let cli =
+            Cli::try_parse_from(["shrd", "config", "ai", "presets"]).expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Config {
+                action:
+                    ConfigAction::Ai {
+                        action: AiConfigAction::Presets,
+                    },
+                ..
+            }) => {}
+            _ => panic!("expected config ai presets command"),
         }
     }
 
@@ -2864,7 +3174,8 @@ mod tests {
     fn resolve_ai_skill_targets_uses_expected_paths() {
         let home = PathBuf::from("/tmp/home");
         let xdg = PathBuf::from("/tmp/xdg");
-        let targets = resolve_ai_skill_targets_from_roots(&home, &xdg, AiTool::All);
+        let targets =
+            resolve_ai_skill_targets_from_roots(&home, &xdg, AiSelection::Preset(AiPreset::All));
 
         let paths: Vec<(AiTool, PathBuf)> = targets
             .into_iter()
@@ -2899,6 +3210,28 @@ mod tests {
                 .join("shrd")
                 .join("SKILL.md"),
         )));
+    }
+
+    #[test]
+    fn resolve_ai_selection_defaults_to_all_preset() {
+        let (selection, explicit) = resolve_ai_selection(&AiTargetOptions::default(), None);
+
+        assert_eq!(selection, AiSelection::Preset(AiPreset::All));
+        assert!(!explicit);
+    }
+
+    #[test]
+    fn resolve_ai_selection_prefers_explicit_tool() {
+        let (selection, explicit) = resolve_ai_selection(
+            &AiTargetOptions {
+                tool: Some(AiTool::Codex),
+                preset: None,
+            },
+            Some(AiPreset::All),
+        );
+
+        assert_eq!(selection, AiSelection::Tool(AiTool::Codex));
+        assert!(explicit);
     }
 
     #[test]
