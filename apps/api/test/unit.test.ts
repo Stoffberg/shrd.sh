@@ -131,6 +131,25 @@ function createMockEnv(): Env {
   }
 }
 
+function createLegacySchemaEnv(): Env {
+  const env = createMockEnv()
+  env.DB = {
+    prepare: vi.fn(() => ({
+      bind: vi.fn().mockReturnThis(),
+      first: vi.fn(async () => {
+        throw new Error("D1_ERROR: no such table: shares")
+      }),
+      run: vi.fn(async () => {
+        throw new Error("D1_ERROR: no such table: shares")
+      }),
+      all: vi.fn(async () => {
+        throw new Error("D1_ERROR: no such table: shares")
+      }),
+    })),
+  } as unknown as D1Database
+  return env
+}
+
 describe("Health endpoint", () => {
   it("returns status ok", async () => {
     const env = createMockEnv()
@@ -166,6 +185,23 @@ describe("Push endpoint", () => {
     expect(body.deleteToken).toBeDefined()
     expect(body.deleteToken).toHaveLength(32)
     expect(body.expiresAt).toBeDefined()
+  })
+
+  it("falls back to KV when D1 schema is unavailable", async () => {
+    const legacyEnv = createLegacySchemaEnv()
+
+    const pushResponse = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "legacy fallback" }),
+    }, legacyEnv)
+
+    expect(pushResponse.status).toBe(201)
+    const pushBody = await pushResponse.json() as JsonResponse
+
+    const rawResponse = await app.request(`/${pushBody.id as string}/raw`, {}, legacyEnv)
+    expect(rawResponse.status).toBe(200)
+    expect(await rawResponse.text()).toBe("legacy fallback")
   })
 
   it("sets custom content type", async () => {

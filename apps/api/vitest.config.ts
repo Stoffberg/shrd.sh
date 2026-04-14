@@ -1,10 +1,11 @@
-import { defineConfig } from "vitest/config"
+import { configDefaults, defineConfig } from "vitest/config"
 
 export default defineConfig({
   test: {
     globals: true,
     environment: "node",
     include: ["test/**/*.test.ts"],
+    exclude: [...configDefaults.exclude, "test/integration.test.ts"],
     testTimeout: 30000,
     coverage: {
       provider: "v8",

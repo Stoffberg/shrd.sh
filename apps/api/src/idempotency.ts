@@ -1,4 +1,5 @@
 import type { Env } from "./types"
+import { hasD1, shouldUseLegacyFallback, supportsD1Feature } from "./d1"
 
 const IDEMPOTENCY_PREFIX = "idempotency:"
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000
@@ -23,8 +24,19 @@ export type IdempotencyReservation =
   | { kind: "conflict" }
   | { kind: "in_progress" }
 
-function hasD1(env: Env): boolean {
-  return typeof env.DB?.prepare === "function"
+async function canUseIdempotencyD1(env: Env): Promise<boolean> {
+  return supportsD1Feature(
+    env,
+    "idempotency",
+    `SELECT
+      idempotency_key,
+      request_hash,
+      response_json,
+      response_status,
+      resource_id
+    FROM idempotency_keys
+    LIMIT 1`
+  )
 }
 
 function stableStringify(value: unknown): string {
@@ -92,63 +104,72 @@ export async function reserveIdempotency(
   const now = new Date()
   const expiresAt = new Date(now.getTime() + IDEMPOTENCY_TTL_MS).toISOString()
 
-  if (hasD1(env)) {
-    const existing = await env.DB.prepare(
-      `SELECT
-        scope,
-        idempotency_key AS idempotencyKey,
-        request_hash AS requestHash,
-        status,
-        response_json AS responseJson,
-        response_status AS responseStatus,
-        resource_id AS resourceId,
-        created_at AS createdAt,
-        expires_at AS expiresAt
-      FROM idempotency_keys
-      WHERE scope = ? AND idempotency_key = ?
-      LIMIT 1`
-    ).bind(scope, idempotencyKey).first<IdempotencyRecord>()
-
-    if (existing) {
-      if (isExpired(existing.expiresAt)) {
-        await clearIdempotency(env, scope, idempotencyKey)
-      } else if (existing.requestHash !== requestHash) {
-        return { kind: "conflict" }
-      } else if (existing.status === "completed") {
-        return parseReplay(existing)
-      } else {
-        return { kind: "in_progress" }
-      }
-    }
-
+  if (await canUseIdempotencyD1(env)) {
     try {
-      await env.DB.prepare(
-        `INSERT INTO idempotency_keys (
+      const existing = await env.DB.prepare(
+        `SELECT
           scope,
-          idempotency_key,
-          request_hash,
+          idempotency_key AS idempotencyKey,
+          request_hash AS requestHash,
           status,
-          response_json,
-          response_status,
-          resource_id,
-          created_at,
-          expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(
-        scope,
-        idempotencyKey,
-        requestHash,
-        "in_progress",
-        null,
-        null,
-        null,
-        now.toISOString(),
-        expiresAt
-      ).run()
-      return { kind: "new" }
-    } catch {
-      const retry = await reserveIdempotency(env, scope, idempotencyKey, requestHash)
-      return retry
+          response_json AS responseJson,
+          response_status AS responseStatus,
+          resource_id AS resourceId,
+          created_at AS createdAt,
+          expires_at AS expiresAt
+        FROM idempotency_keys
+        WHERE scope = ? AND idempotency_key = ?
+        LIMIT 1`
+      ).bind(scope, idempotencyKey).first<IdempotencyRecord>()
+
+      if (existing) {
+        if (isExpired(existing.expiresAt)) {
+          await clearIdempotency(env, scope, idempotencyKey)
+        } else if (existing.requestHash !== requestHash) {
+          return { kind: "conflict" }
+        } else if (existing.status === "completed") {
+          return parseReplay(existing)
+        } else {
+          return { kind: "in_progress" }
+        }
+      }
+
+      try {
+        await env.DB.prepare(
+          `INSERT INTO idempotency_keys (
+            scope,
+            idempotency_key,
+            request_hash,
+            status,
+            response_json,
+            response_status,
+            resource_id,
+            created_at,
+            expires_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          scope,
+          idempotencyKey,
+          requestHash,
+          "in_progress",
+          null,
+          null,
+          null,
+          now.toISOString(),
+          expiresAt
+        ).run()
+        return { kind: "new" }
+      } catch (error) {
+        if (shouldUseLegacyFallback(error)) {
+          return reserveIdempotency(env, scope, idempotencyKey, requestHash)
+        }
+        const retry = await reserveIdempotency(env, scope, idempotencyKey, requestHash)
+        return retry
+      }
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
     }
   }
 
@@ -189,13 +210,19 @@ export async function completeIdempotency(
 ): Promise<void> {
   const responseJson = JSON.stringify(response)
 
-  if (hasD1(env)) {
-    await env.DB.prepare(
-      `UPDATE idempotency_keys
-      SET status = ?, response_json = ?, response_status = ?, resource_id = ?
-      WHERE scope = ? AND idempotency_key = ?`
-    ).bind("completed", responseJson, status, resourceId ?? null, scope, idempotencyKey).run()
-    return
+  if (await canUseIdempotencyD1(env)) {
+    try {
+      await env.DB.prepare(
+        `UPDATE idempotency_keys
+        SET status = ?, response_json = ?, response_status = ?, resource_id = ?
+        WHERE scope = ? AND idempotency_key = ?`
+      ).bind("completed", responseJson, status, resourceId ?? null, scope, idempotencyKey).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   const existing = await getKvRecord(env, scope, idempotencyKey)
@@ -217,11 +244,17 @@ export async function clearIdempotency(
   scope: string,
   idempotencyKey: string
 ): Promise<void> {
-  if (hasD1(env)) {
-    await env.DB.prepare(
-      "DELETE FROM idempotency_keys WHERE scope = ? AND idempotency_key = ?"
-    ).bind(scope, idempotencyKey).run()
-    return
+  if (await canUseIdempotencyD1(env)) {
+    try {
+      await env.DB.prepare(
+        "DELETE FROM idempotency_keys WHERE scope = ? AND idempotency_key = ?"
+      ).bind(scope, idempotencyKey).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   await env.CONTENT.delete(toKey(scope, idempotencyKey))

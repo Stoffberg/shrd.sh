@@ -6,6 +6,7 @@ import type {
   ShareKind,
   StoredContent,
 } from "./types"
+import { hasD1, shouldUseLegacyFallback, supportsD1Feature } from "./d1"
 
 const KV_SIZE_LIMIT = 25 * 1024
 const CANONICAL_PREFIX = "canonical:"
@@ -58,8 +59,34 @@ type MultipartPartRow = {
   size: number
 }
 
-function hasD1(env: Env): boolean {
-  return typeof env.DB?.prepare === "function"
+async function canUseCanonicalD1(env: Env): Promise<boolean> {
+  return supportsD1Feature(
+    env,
+    "canonical-storage",
+    `SELECT
+      content_type,
+      filename,
+      max_views,
+      inline_body,
+      inline_body_encoding,
+      last_accessed_at
+    FROM shares
+    LIMIT 1`
+  )
+}
+
+async function canUseMultipartD1(env: Env): Promise<boolean> {
+  return supportsD1Feature(
+    env,
+    "multipart-storage",
+    `SELECT
+      upload_id,
+      resume_token,
+      delete_token,
+      ttl_seconds
+    FROM multipart_sessions
+    LIMIT 1`
+  )
 }
 
 async function getJson<T>(env: Env, key: string): Promise<T | null> {
@@ -119,42 +146,48 @@ function toCanonicalMetadata(row: CanonicalRow): CanonicalContentMetadata {
 }
 
 async function getCanonicalRow(env: Env, id: string): Promise<CanonicalRow | null> {
-  if (hasD1(env)) {
-    const row = await env.DB.prepare(
-      `SELECT
-        id,
-        type,
-        name,
-        size,
-        views,
-        burned,
-        encrypted,
-        storage_key AS storageKey,
-        storage_type AS storageType,
-        delete_token AS deleteToken,
-        content_type AS contentType,
-        filename,
-        max_views AS maxViews,
-        inline_body AS inlineBody,
-        inline_body_encoding AS inlineBodyEncoding,
-        last_accessed_at AS lastAccessedAt,
-        expires_at AS expiresAt,
-        created_at AS createdAt
-      FROM shares
-      WHERE id = ?
-      LIMIT 1`
-    ).bind(id).first<CanonicalRow>()
+  if (await canUseCanonicalD1(env)) {
+    try {
+      const row = await env.DB.prepare(
+        `SELECT
+          id,
+          type,
+          name,
+          size,
+          views,
+          burned,
+          encrypted,
+          storage_key AS storageKey,
+          storage_type AS storageType,
+          delete_token AS deleteToken,
+          content_type AS contentType,
+          filename,
+          max_views AS maxViews,
+          inline_body AS inlineBody,
+          inline_body_encoding AS inlineBodyEncoding,
+          last_accessed_at AS lastAccessedAt,
+          expires_at AS expiresAt,
+          created_at AS createdAt
+        FROM shares
+        WHERE id = ?
+        LIMIT 1`
+      ).bind(id).first<CanonicalRow>()
 
-    if (!row) {
-      return null
+      if (!row) {
+        return null
+      }
+
+      if (isExpired(row.expiresAt)) {
+        await deleteCanonicalShare(env, row.id, row)
+        return null
+      }
+
+      return row
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
     }
-
-    if (isExpired(row.expiresAt)) {
-      await deleteCanonicalShare(env, row.id, row)
-      return null
-    }
-
-    return row
   }
 
   const stored = await getJson<StoredContent>(env, `${CANONICAL_PREFIX}${id}`)
@@ -213,12 +246,18 @@ async function deleteCanonicalShare(
     return false
   }
 
-  if (hasD1(env)) {
-    if (existing.storageType === "r2") {
-      await env.STORAGE.delete(existing.storageKey || id)
+  if (await canUseCanonicalD1(env)) {
+    try {
+      if (existing.storageType === "r2") {
+        await env.STORAGE.delete(existing.storageKey || id)
+      }
+      await env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(id).run()
+      return true
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
     }
-    await env.DB.prepare("DELETE FROM shares WHERE id = ?").bind(id).run()
-    return true
   }
 
   if (existing.storageType === "r2") {
@@ -264,12 +303,18 @@ export async function shareExists(env: Env, id: string): Promise<boolean> {
     return true
   }
 
-  if (hasD1(env)) {
-    const multipart = await env.DB.prepare("SELECT id FROM multipart_sessions WHERE id = ? LIMIT 1")
-      .bind(id)
-      .first<{ id: string }>()
-    if (multipart) {
-      return true
+  if (await canUseMultipartD1(env)) {
+    try {
+      const multipart = await env.DB.prepare("SELECT id FROM multipart_sessions WHERE id = ? LIMIT 1")
+        .bind(id)
+        .first<{ id: string }>()
+      if (multipart) {
+        return true
+      }
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
     }
   } else {
     const multipart = await env.CONTENT.get(`${MULTIPART_PREFIX}${id}`)
@@ -291,58 +336,64 @@ export async function storeContent(
   const storageType = contentSize <= KV_SIZE_LIMIT ? "kv" : "r2"
   metadata.storageType = storageType
 
-  if (hasD1(env)) {
-    if (storageType === "r2") {
-      await env.STORAGE.put(id, content, {
-        customMetadata: {
-          contentType: metadata.contentType,
-          filename: metadata.filename ?? "",
-        },
-      })
-    }
+  if (await canUseCanonicalD1(env)) {
+    try {
+      if (storageType === "r2") {
+        await env.STORAGE.put(id, content, {
+          customMetadata: {
+            contentType: metadata.contentType,
+            filename: metadata.filename ?? "",
+          },
+        })
+      }
 
-    await env.DB.prepare(
-      `INSERT INTO shares (
+      await env.DB.prepare(
+        `INSERT INTO shares (
+          id,
+          type,
+          name,
+          size,
+          views,
+          burned,
+          encrypted,
+          storage_key,
+          storage_type,
+          delete_token,
+          content_type,
+          filename,
+          max_views,
+          inline_body,
+          inline_body_encoding,
+          last_accessed_at,
+          expires_at,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        metadata.id,
+        inferShareKind(metadata.contentType),
+        metadata.name ?? null,
+        metadata.size,
+        metadata.views,
+        0,
+        metadata.encrypted ? 1 : 0,
         id,
-        type,
-        name,
-        size,
-        views,
-        burned,
-        encrypted,
-        storage_key,
-        storage_type,
-        delete_token,
-        content_type,
-        filename,
-        max_views,
-        inline_body,
-        inline_body_encoding,
-        last_accessed_at,
-        expires_at,
-        created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      metadata.id,
-      inferShareKind(metadata.contentType),
-      metadata.name ?? null,
-      metadata.size,
-      metadata.views,
-      0,
-      metadata.encrypted ? 1 : 0,
-      id,
-      storageType,
-      metadata.deleteToken,
-      metadata.contentType,
-      metadata.filename ?? null,
-      metadata.maxViews ?? null,
-      storageType === "kv" ? content : null,
-      metadata.encrypted ? "base64" : "utf8",
-      null,
-      metadata.expiresAt,
-      metadata.createdAt
-    ).run()
-    return
+        storageType,
+        metadata.deleteToken,
+        metadata.contentType,
+        metadata.filename ?? null,
+        metadata.maxViews ?? null,
+        storageType === "kv" ? content : null,
+        metadata.encrypted ? "base64" : "utf8",
+        null,
+        metadata.expiresAt,
+        metadata.createdAt
+      ).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   if (storageType === "r2") {
@@ -374,49 +425,55 @@ export async function storeBlobMetadata(
 ): Promise<void> {
   metadata.storageType = "r2"
 
-  if (hasD1(env)) {
-    await env.DB.prepare(
-      `INSERT INTO shares (
-        id,
-        type,
-        name,
-        size,
-        views,
-        burned,
-        encrypted,
-        storage_key,
-        storage_type,
-        delete_token,
-        content_type,
-        filename,
-        max_views,
-        inline_body,
-        inline_body_encoding,
-        last_accessed_at,
-        expires_at,
-        created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      metadata.id,
-      inferShareKind(metadata.contentType),
-      metadata.name ?? null,
-      metadata.size,
-      metadata.views,
-      0,
-      metadata.encrypted ? 1 : 0,
-      storageKey,
-      "r2",
-      metadata.deleteToken,
-      metadata.contentType,
-      metadata.filename ?? null,
-      metadata.maxViews ?? null,
-      null,
-      null,
-      null,
-      metadata.expiresAt,
-      metadata.createdAt
-    ).run()
-    return
+  if (await canUseCanonicalD1(env)) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO shares (
+          id,
+          type,
+          name,
+          size,
+          views,
+          burned,
+          encrypted,
+          storage_key,
+          storage_type,
+          delete_token,
+          content_type,
+          filename,
+          max_views,
+          inline_body,
+          inline_body_encoding,
+          last_accessed_at,
+          expires_at,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        metadata.id,
+        inferShareKind(metadata.contentType),
+        metadata.name ?? null,
+        metadata.size,
+        metadata.views,
+        0,
+        metadata.encrypted ? 1 : 0,
+        storageKey,
+        "r2",
+        metadata.deleteToken,
+        metadata.contentType,
+        metadata.filename ?? null,
+        metadata.maxViews ?? null,
+        null,
+        null,
+        null,
+        metadata.expiresAt,
+        metadata.createdAt
+      ).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   await env.CONTENT.put(
@@ -531,13 +588,19 @@ export async function incrementViews(
 ): Promise<void> {
   const canonical = await getCanonicalRow(env, id)
   if (canonical) {
-    if (hasD1(env)) {
-      await env.DB.prepare(
-        `UPDATE shares
-        SET views = views + 1, last_accessed_at = ?
-        WHERE id = ?`
-      ).bind(new Date().toISOString(), id).run()
-      return
+    if (await canUseCanonicalD1(env)) {
+      try {
+        await env.DB.prepare(
+          `UPDATE shares
+          SET views = views + 1, last_accessed_at = ?
+          WHERE id = ?`
+        ).bind(new Date().toISOString(), id).run()
+        return
+      } catch (error) {
+        if (!shouldUseLegacyFallback(error)) {
+          throw error
+        }
+      }
     }
 
     const stored = await getJson<StoredContent>(env, `${CANONICAL_PREFIX}${id}`)
@@ -593,41 +656,47 @@ export async function createMultipartSession(
   env: Env,
   session: MultipartUploadSession
 ): Promise<void> {
-  if (hasD1(env)) {
-    await env.DB.prepare(
-      `INSERT INTO multipart_sessions (
-        id,
-        upload_id,
-        resume_token,
-        delete_token,
-        content_type,
-        filename,
-        expire,
-        ttl_seconds,
-        burn,
-        name,
-        encrypted,
-        part_size,
-        created_at,
-        expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      session.id,
-      session.uploadId,
-      session.resumeToken,
-      session.deleteToken,
-      session.contentType,
-      session.filename ?? null,
-      session.expire ?? null,
-      session.ttlSeconds ?? null,
-      session.burn ? 1 : 0,
-      session.name ?? null,
-      session.encrypted ? 1 : 0,
-      session.partSize,
-      session.createdAt,
-      session.expiresAt ?? null
-    ).run()
-    return
+  if (await canUseMultipartD1(env)) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO multipart_sessions (
+          id,
+          upload_id,
+          resume_token,
+          delete_token,
+          content_type,
+          filename,
+          expire,
+          ttl_seconds,
+          burn,
+          name,
+          encrypted,
+          part_size,
+          created_at,
+          expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        session.id,
+        session.uploadId,
+        session.resumeToken,
+        session.deleteToken,
+        session.contentType,
+        session.filename ?? null,
+        session.expire ?? null,
+        session.ttlSeconds ?? null,
+        session.burn ? 1 : 0,
+        session.name ?? null,
+        session.encrypted ? 1 : 0,
+        session.partSize,
+        session.createdAt,
+        session.expiresAt ?? null
+      ).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   await env.CONTENT.put(
@@ -645,74 +714,80 @@ export async function getMultipartSession(
   env: Env,
   id: string
 ): Promise<MultipartUploadSession | null> {
-  if (hasD1(env)) {
-    const session = await env.DB.prepare(
-      `SELECT
-        id,
-        upload_id AS uploadId,
-        resume_token AS resumeToken,
-        delete_token AS deleteToken,
-        content_type AS contentType,
-        filename,
-        expire,
-        ttl_seconds AS ttlSeconds,
-        burn,
-        name,
-        encrypted,
-        part_size AS partSize,
-        created_at AS createdAt,
-        expires_at AS expiresAt
-      FROM multipart_sessions
-      WHERE id = ?
-      LIMIT 1`
-    ).bind(id).first<MultipartSessionRow>()
+  if (await canUseMultipartD1(env)) {
+    try {
+      const session = await env.DB.prepare(
+        `SELECT
+          id,
+          upload_id AS uploadId,
+          resume_token AS resumeToken,
+          delete_token AS deleteToken,
+          content_type AS contentType,
+          filename,
+          expire,
+          ttl_seconds AS ttlSeconds,
+          burn,
+          name,
+          encrypted,
+          part_size AS partSize,
+          created_at AS createdAt,
+          expires_at AS expiresAt
+        FROM multipart_sessions
+        WHERE id = ?
+        LIMIT 1`
+      ).bind(id).first<MultipartSessionRow>()
 
-    if (!session) {
-      return null
+      if (!session) {
+        return null
+      }
+
+      const normalized: MultipartUploadSession = {
+        id: session.id,
+        uploadId: session.uploadId,
+        resumeToken: session.resumeToken,
+        deleteToken: session.deleteToken,
+        contentType: session.contentType,
+        filename: session.filename ?? undefined,
+        expire: session.expire ?? undefined,
+        ttlSeconds: session.ttlSeconds,
+        burn: Boolean(session.burn),
+        name: session.name,
+        encrypted: Boolean(session.encrypted),
+        partSize: session.partSize,
+        expiresAt: session.expiresAt,
+        createdAt: session.createdAt,
+        parts: [],
+      }
+
+      if (sessionIsStale(normalized)) {
+        await deleteMultipartSession(env, id, session.uploadId)
+        return null
+      }
+
+      const result = await env.DB.prepare(
+        `SELECT
+          part_number AS partNumber,
+          etag,
+          sha256,
+          size
+        FROM multipart_parts
+        WHERE session_id = ?
+        ORDER BY part_number ASC`
+      ).bind(id).all<MultipartPartRow>()
+
+      normalized.parts = (result.results ?? []).map((part) => ({
+        partNumber: part.partNumber,
+        etag: part.etag,
+        sha256: part.sha256,
+        size: part.size,
+      }))
+
+      return normalized
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
     }
-
-    const normalized: MultipartUploadSession = {
-      id: session.id,
-      uploadId: session.uploadId,
-      resumeToken: session.resumeToken,
-      deleteToken: session.deleteToken,
-      contentType: session.contentType,
-      filename: session.filename ?? undefined,
-      expire: session.expire ?? undefined,
-      ttlSeconds: session.ttlSeconds,
-      burn: Boolean(session.burn),
-      name: session.name,
-      encrypted: Boolean(session.encrypted),
-      partSize: session.partSize,
-      expiresAt: session.expiresAt,
-      createdAt: session.createdAt,
-      parts: [],
-    }
-
-    if (sessionIsStale(normalized)) {
-      await deleteMultipartSession(env, id, session.uploadId)
-      return null
-    }
-
-    const result = await env.DB.prepare(
-      `SELECT
-        part_number AS partNumber,
-        etag,
-        sha256,
-        size
-      FROM multipart_parts
-      WHERE session_id = ?
-      ORDER BY part_number ASC`
-    ).bind(id).all<MultipartPartRow>()
-
-    normalized.parts = (result.results ?? []).map((part) => ({
-      partNumber: part.partNumber,
-      etag: part.etag,
-      sha256: part.sha256,
-      size: part.size,
-    }))
-
-    return normalized
   }
 
   const session = await getJson<MultipartUploadSession>(env, `${MULTIPART_PREFIX}${id}`)
@@ -733,16 +808,22 @@ export async function saveMultipartPart(
   session: MultipartUploadSession,
   part: { partNumber: number; etag: string; sha256: string; size: number }
 ): Promise<void> {
-  if (hasD1(env)) {
-    await env.DB.prepare(
-      `INSERT INTO multipart_parts (session_id, part_number, etag, sha256, size)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(session_id, part_number) DO UPDATE SET
-        etag = excluded.etag,
-        sha256 = excluded.sha256,
-        size = excluded.size`
-    ).bind(session.id, part.partNumber, part.etag, part.sha256, part.size).run()
-    return
+  if (await canUseMultipartD1(env)) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO multipart_parts (session_id, part_number, etag, sha256, size)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(session_id, part_number) DO UPDATE SET
+          etag = excluded.etag,
+          sha256 = excluded.sha256,
+          size = excluded.size`
+      ).bind(session.id, part.partNumber, part.etag, part.sha256, part.size).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   const updated = {
@@ -762,40 +843,54 @@ export async function deleteMultipartSession(
   id: string,
   uploadId?: string
 ): Promise<void> {
-  if (hasD1(env)) {
-    const session = uploadId
-      ? { uploadId }
-      : await env.DB.prepare("SELECT upload_id AS uploadId FROM multipart_sessions WHERE id = ? LIMIT 1")
-          .bind(id)
-          .first<{ uploadId: string }>()
-
+  if (await canUseMultipartD1(env)) {
     try {
-      if (session?.uploadId) {
-        await env.STORAGE.resumeMultipartUpload(id, session.uploadId).abort()
-      }
-    } catch {}
+      const session = uploadId
+        ? { uploadId }
+        : await env.DB.prepare("SELECT upload_id AS uploadId FROM multipart_sessions WHERE id = ? LIMIT 1")
+            .bind(id)
+            .first<{ uploadId: string }>()
 
-    await env.DB.prepare("DELETE FROM multipart_parts WHERE session_id = ?").bind(id).run()
-    await env.DB.prepare("DELETE FROM multipart_sessions WHERE id = ?").bind(id).run()
-    return
+      try {
+        if (session?.uploadId) {
+          await env.STORAGE.resumeMultipartUpload(id, session.uploadId).abort()
+        }
+      } catch {}
+
+      await env.DB.prepare("DELETE FROM multipart_parts WHERE session_id = ?").bind(id).run()
+      await env.DB.prepare("DELETE FROM multipart_sessions WHERE id = ?").bind(id).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   await env.CONTENT.delete(`${MULTIPART_PREFIX}${id}`)
 }
 
 export async function cleanupExpiredShares(env: Env): Promise<number> {
-  if (!hasD1(env)) {
+  if (!(await canUseCanonicalD1(env))) {
     return 0
   }
 
-  const result = await env.DB.prepare(
-    `SELECT
-      id,
-      storage_key AS storageKey,
-      storage_type AS storageType
-    FROM shares
-    WHERE expires_at IS NOT NULL AND expires_at <= ?`
-  ).bind(new Date().toISOString()).all<Pick<CanonicalRow, "id" | "storageKey" | "storageType">>()
+  let result
+  try {
+    result = await env.DB.prepare(
+      `SELECT
+        id,
+        storage_key AS storageKey,
+        storage_type AS storageType
+      FROM shares
+      WHERE expires_at IS NOT NULL AND expires_at <= ?`
+    ).bind(new Date().toISOString()).all<Pick<CanonicalRow, "id" | "storageKey" | "storageType">>()
+  } catch (error) {
+    if (shouldUseLegacyFallback(error)) {
+      return 0
+    }
+    throw error
+  }
 
   let deleted = 0
   for (const row of result.results ?? []) {
@@ -810,16 +905,24 @@ export async function cleanupExpiredShares(env: Env): Promise<number> {
 }
 
 export async function cleanupStaleMultipartSessions(env: Env): Promise<number> {
-  if (!hasD1(env)) {
+  if (!(await canUseMultipartD1(env))) {
     return 0
   }
 
   const cutoff = new Date(Date.now() - SESSION_TTL_SECONDS * 1000).toISOString()
-  const result = await env.DB.prepare(
-    `SELECT id, upload_id AS uploadId
-    FROM multipart_sessions
-    WHERE created_at <= ?`
-  ).bind(cutoff).all<{ id: string; uploadId: string }>()
+  let result
+  try {
+    result = await env.DB.prepare(
+      `SELECT id, upload_id AS uploadId
+      FROM multipart_sessions
+      WHERE created_at <= ?`
+    ).bind(cutoff).all<{ id: string; uploadId: string }>()
+  } catch (error) {
+    if (shouldUseLegacyFallback(error)) {
+      return 0
+    }
+    throw error
+  }
 
   let deleted = 0
   for (const row of result.results ?? []) {
@@ -834,12 +937,18 @@ export async function shareExistsForStorageKey(
   env: Env,
   storageKey: string
 ): Promise<boolean> {
-  if (hasD1(env)) {
-    const row = await env.DB.prepare(
-      "SELECT id FROM shares WHERE storage_key = ? LIMIT 1"
-    ).bind(storageKey).first<{ id: string }>()
-    if (row) {
-      return true
+  if (await canUseCanonicalD1(env)) {
+    try {
+      const row = await env.DB.prepare(
+        "SELECT id FROM shares WHERE storage_key = ? LIMIT 1"
+      ).bind(storageKey).first<{ id: string }>()
+      if (row) {
+        return true
+      }
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
     }
   }
 

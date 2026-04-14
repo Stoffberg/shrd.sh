@@ -103,6 +103,6 @@ jobs:
 
       - name: Run smoke tests
         working-directory: apps/api
-        run: pnpm vitest run test/integration.test.ts
+        run: pnpm test:integration
         env:
           SHRD_API_URL: https://shrd.stoff.dev

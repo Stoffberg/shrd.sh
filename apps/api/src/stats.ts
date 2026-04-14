@@ -1,4 +1,5 @@
 import type { ContentMetadata, Env } from "./types"
+import { hasD1, shouldUseLegacyFallback, supportsD1Feature } from "./d1"
 
 const METRICS_PREFIX = "metrics:"
 const SNAPSHOTS_KEY = `${METRICS_PREFIX}storage:snapshots`
@@ -55,8 +56,69 @@ const ZERO_METRICS: DailyMetrics = {
   bytesUploaded: 0,
 }
 
-function hasD1(env: Env): boolean {
-  return typeof env.DB?.prepare === "function"
+async function canUseMetricsD1(env: Env): Promise<boolean> {
+  return supportsD1Feature(
+    env,
+    "daily-metrics",
+    `SELECT
+      uploads_total,
+      uploads_inline,
+      uploads_multipart,
+      reads_raw,
+      reads_meta,
+      reads_html,
+      deletes,
+      not_found,
+      errors_4xx,
+      errors_5xx,
+      idempotency_hits,
+      idempotency_conflicts,
+      multipart_resumes,
+      bytes_uploaded
+    FROM daily_metrics
+    LIMIT 1`
+  )
+}
+
+async function canUseContentTypeStatsD1(env: Env): Promise<boolean> {
+  return supportsD1Feature(
+    env,
+    "daily-content-types",
+    `SELECT
+      content_type,
+      uploads,
+      bytes
+    FROM daily_content_types
+    LIMIT 1`
+  )
+}
+
+async function canUseStorageSnapshotsD1(env: Env): Promise<boolean> {
+  return supportsD1Feature(
+    env,
+    "storage-snapshots",
+    `SELECT
+      inline_share_count,
+      inline_bytes,
+      r2_object_count,
+      r2_bytes,
+      cleanup_checked,
+      cleanup_deleted
+    FROM storage_snapshots
+    LIMIT 1`
+  )
+}
+
+async function canUseCanonicalShareStatsD1(env: Env): Promise<boolean> {
+  return supportsD1Feature(
+    env,
+    "canonical-share-stats",
+    `SELECT
+      storage_type,
+      size
+    FROM shares
+    LIMIT 1`
+  )
 }
 
 function today(): string {
@@ -91,58 +153,64 @@ export async function recordMetrics(env: Env, delta: MetricsDelta): Promise<void
   const day = today()
   const normalized = normalizeMetrics(delta)
 
-  if (hasD1(env)) {
-    await env.DB.prepare(
-      `INSERT INTO daily_metrics (
+  if (await canUseMetricsD1(env)) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO daily_metrics (
+          day,
+          uploads_total,
+          uploads_inline,
+          uploads_multipart,
+          reads_raw,
+          reads_meta,
+          reads_html,
+          deletes,
+          not_found,
+          errors_4xx,
+          errors_5xx,
+          idempotency_hits,
+          idempotency_conflicts,
+          multipart_resumes,
+          bytes_uploaded
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(day) DO UPDATE SET
+          uploads_total = uploads_total + excluded.uploads_total,
+          uploads_inline = uploads_inline + excluded.uploads_inline,
+          uploads_multipart = uploads_multipart + excluded.uploads_multipart,
+          reads_raw = reads_raw + excluded.reads_raw,
+          reads_meta = reads_meta + excluded.reads_meta,
+          reads_html = reads_html + excluded.reads_html,
+          deletes = deletes + excluded.deletes,
+          not_found = not_found + excluded.not_found,
+          errors_4xx = errors_4xx + excluded.errors_4xx,
+          errors_5xx = errors_5xx + excluded.errors_5xx,
+          idempotency_hits = idempotency_hits + excluded.idempotency_hits,
+          idempotency_conflicts = idempotency_conflicts + excluded.idempotency_conflicts,
+          multipart_resumes = multipart_resumes + excluded.multipart_resumes,
+          bytes_uploaded = bytes_uploaded + excluded.bytes_uploaded`
+      ).bind(
         day,
-        uploads_total,
-        uploads_inline,
-        uploads_multipart,
-        reads_raw,
-        reads_meta,
-        reads_html,
-        deletes,
-        not_found,
-        errors_4xx,
-        errors_5xx,
-        idempotency_hits,
-        idempotency_conflicts,
-        multipart_resumes,
-        bytes_uploaded
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(day) DO UPDATE SET
-        uploads_total = uploads_total + excluded.uploads_total,
-        uploads_inline = uploads_inline + excluded.uploads_inline,
-        uploads_multipart = uploads_multipart + excluded.uploads_multipart,
-        reads_raw = reads_raw + excluded.reads_raw,
-        reads_meta = reads_meta + excluded.reads_meta,
-        reads_html = reads_html + excluded.reads_html,
-        deletes = deletes + excluded.deletes,
-        not_found = not_found + excluded.not_found,
-        errors_4xx = errors_4xx + excluded.errors_4xx,
-        errors_5xx = errors_5xx + excluded.errors_5xx,
-        idempotency_hits = idempotency_hits + excluded.idempotency_hits,
-        idempotency_conflicts = idempotency_conflicts + excluded.idempotency_conflicts,
-        multipart_resumes = multipart_resumes + excluded.multipart_resumes,
-        bytes_uploaded = bytes_uploaded + excluded.bytes_uploaded`
-    ).bind(
-      day,
-      normalized.uploadsTotal,
-      normalized.uploadsInline,
-      normalized.uploadsMultipart,
-      normalized.readsRaw,
-      normalized.readsMeta,
-      normalized.readsHtml,
-      normalized.deletes,
-      normalized.notFound,
-      normalized.errors4xx,
-      normalized.errors5xx,
-      normalized.idempotencyHits,
-      normalized.idempotencyConflicts,
-      normalized.multipartResumes,
-      normalized.bytesUploaded
-    ).run()
-    return
+        normalized.uploadsTotal,
+        normalized.uploadsInline,
+        normalized.uploadsMultipart,
+        normalized.readsRaw,
+        normalized.readsMeta,
+        normalized.readsHtml,
+        normalized.deletes,
+        normalized.notFound,
+        normalized.errors4xx,
+        normalized.errors5xx,
+        normalized.idempotencyHits,
+        normalized.idempotencyConflicts,
+        normalized.multipartResumes,
+        normalized.bytesUploaded
+      ).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   const existing = normalizeMetrics(await getKvJson<MetricsDelta>(env, metricsKey(day)))
@@ -178,19 +246,25 @@ export async function recordUploadMetrics(
   })
 
   const day = today()
-  if (hasD1(env)) {
-    await env.DB.prepare(
-      `INSERT INTO daily_content_types (
-        day,
-        content_type,
-        uploads,
-        bytes
-      ) VALUES (?, ?, ?, ?)
-      ON CONFLICT(day, content_type) DO UPDATE SET
-        uploads = uploads + excluded.uploads,
-        bytes = bytes + excluded.bytes`
-    ).bind(day, metadata.contentType, 1, metadata.size).run()
-    return
+  if (await canUseContentTypeStatsD1(env)) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO daily_content_types (
+          day,
+          content_type,
+          uploads,
+          bytes
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(day, content_type) DO UPDATE SET
+          uploads = uploads + excluded.uploads,
+          bytes = bytes + excluded.bytes`
+      ).bind(day, metadata.contentType, 1, metadata.size).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   const existing = (await getKvJson<Record<string, ContentTypeStatsItem>>(env, contentTypesKey(day))) ?? {}
@@ -233,27 +307,33 @@ export async function getSummaryStats(env: Env, window: "24h" | "7d" | "30d") {
   const cutoff = cutoffDay(window)
 
   let metrics = { ...ZERO_METRICS }
-  if (hasD1(env)) {
-    const result = await env.DB.prepare(
-      `SELECT
-        uploads_total AS uploadsTotal,
-        uploads_inline AS uploadsInline,
-        uploads_multipart AS uploadsMultipart,
-        reads_raw AS readsRaw,
-        reads_meta AS readsMeta,
-        reads_html AS readsHtml,
-        deletes,
-        not_found AS notFound,
-        errors_4xx AS errors4xx,
-        errors_5xx AS errors5xx,
-        idempotency_hits AS idempotencyHits,
-        idempotency_conflicts AS idempotencyConflicts,
-        multipart_resumes AS multipartResumes,
-        bytes_uploaded AS bytesUploaded
-      FROM daily_metrics
-      WHERE day >= ?`
-    ).bind(cutoff).all<DailyMetrics>()
-    metrics = mergeMetrics(result.results ?? [])
+  if (await canUseMetricsD1(env)) {
+    try {
+      const result = await env.DB.prepare(
+        `SELECT
+          uploads_total AS uploadsTotal,
+          uploads_inline AS uploadsInline,
+          uploads_multipart AS uploadsMultipart,
+          reads_raw AS readsRaw,
+          reads_meta AS readsMeta,
+          reads_html AS readsHtml,
+          deletes,
+          not_found AS notFound,
+          errors_4xx AS errors4xx,
+          errors_5xx AS errors5xx,
+          idempotency_hits AS idempotencyHits,
+          idempotency_conflicts AS idempotencyConflicts,
+          multipart_resumes AS multipartResumes,
+          bytes_uploaded AS bytesUploaded
+        FROM daily_metrics
+        WHERE day >= ?`
+      ).bind(cutoff).all<DailyMetrics>()
+      metrics = mergeMetrics(result.results ?? [])
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   } else {
     const rows: DailyMetrics[] = []
     for (const day of enumerateDays(cutoff, today())) {
@@ -288,19 +368,25 @@ export async function getContentTypeStats(
   const cutoff = cutoffDay(window)
   let items: ContentTypeStatsItem[] = []
 
-  if (hasD1(env)) {
-    const result = await env.DB.prepare(
-      `SELECT
-        content_type AS contentType,
-        SUM(uploads) AS uploads,
-        SUM(bytes) AS bytes
-      FROM daily_content_types
-      WHERE day >= ?
-      GROUP BY content_type
-      ORDER BY uploads DESC, bytes DESC
-      LIMIT ?`
-    ).bind(cutoff, limit).all<ContentTypeStatsItem>()
-    items = result.results ?? []
+  if (await canUseContentTypeStatsD1(env)) {
+    try {
+      const result = await env.DB.prepare(
+        `SELECT
+          content_type AS contentType,
+          SUM(uploads) AS uploads,
+          SUM(bytes) AS bytes
+        FROM daily_content_types
+        WHERE day >= ?
+        GROUP BY content_type
+        ORDER BY uploads DESC, bytes DESC
+        LIMIT ?`
+      ).bind(cutoff, limit).all<ContentTypeStatsItem>()
+      items = result.results ?? []
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   } else {
     const merged = new Map<string, ContentTypeStatsItem>()
     for (const day of enumerateDays(cutoff, today())) {
@@ -331,27 +417,33 @@ export async function recordStorageSnapshot(
   env: Env,
   snapshot: StorageSnapshot
 ): Promise<void> {
-  if (hasD1(env)) {
-    await env.DB.prepare(
-      `INSERT INTO storage_snapshots (
-        timestamp,
-        inline_share_count,
-        inline_bytes,
-        r2_object_count,
-        r2_bytes,
-        cleanup_checked,
-        cleanup_deleted
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      snapshot.timestamp,
-      snapshot.inlineShareCount,
-      snapshot.inlineBytes,
-      snapshot.r2ObjectCount,
-      snapshot.r2Bytes,
-      snapshot.cleanupChecked,
-      snapshot.cleanupDeleted
-    ).run()
-    return
+  if (await canUseStorageSnapshotsD1(env)) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO storage_snapshots (
+          timestamp,
+          inline_share_count,
+          inline_bytes,
+          r2_object_count,
+          r2_bytes,
+          cleanup_checked,
+          cleanup_deleted
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        snapshot.timestamp,
+        snapshot.inlineShareCount,
+        snapshot.inlineBytes,
+        snapshot.r2ObjectCount,
+        snapshot.r2Bytes,
+        snapshot.cleanupChecked,
+        snapshot.cleanupDeleted
+      ).run()
+      return
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   const existing = (await getKvJson<StorageSnapshot[]>(env, SNAPSHOTS_KEY)) ?? []
@@ -362,21 +454,27 @@ export async function recordStorageSnapshot(
 export async function getStorageStats(env: Env) {
   let snapshots: StorageSnapshot[] = []
 
-  if (hasD1(env)) {
-    const result = await env.DB.prepare(
-      `SELECT
-        timestamp,
-        inline_share_count AS inlineShareCount,
-        inline_bytes AS inlineBytes,
-        r2_object_count AS r2ObjectCount,
-        r2_bytes AS r2Bytes,
-        cleanup_checked AS cleanupChecked,
-        cleanup_deleted AS cleanupDeleted
-      FROM storage_snapshots
-      ORDER BY timestamp DESC
-      LIMIT 168`
-    ).all<StorageSnapshot>()
-    snapshots = (result.results ?? []).reverse()
+  if (await canUseStorageSnapshotsD1(env)) {
+    try {
+      const result = await env.DB.prepare(
+        `SELECT
+          timestamp,
+          inline_share_count AS inlineShareCount,
+          inline_bytes AS inlineBytes,
+          r2_object_count AS r2ObjectCount,
+          r2_bytes AS r2Bytes,
+          cleanup_checked AS cleanupChecked,
+          cleanup_deleted AS cleanupDeleted
+        FROM storage_snapshots
+        ORDER BY timestamp DESC
+        LIMIT 168`
+      ).all<StorageSnapshot>()
+      snapshots = (result.results ?? []).reverse()
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   } else {
     snapshots = (await getKvJson<StorageSnapshot[]>(env, SNAPSHOTS_KEY)) ?? []
   }
@@ -400,16 +498,22 @@ export async function collectStorageSnapshot(
   let inlineShareCount = 0
   let inlineBytes = 0
 
-  if (hasD1(env)) {
-    const aggregate = await env.DB.prepare(
-      `SELECT
-        COUNT(*) AS inlineShareCount,
-        COALESCE(SUM(size), 0) AS inlineBytes
-      FROM shares
-      WHERE storage_type = 'kv'`
-    ).first<{ inlineShareCount: number; inlineBytes: number }>()
-    inlineShareCount = aggregate?.inlineShareCount ?? 0
-    inlineBytes = aggregate?.inlineBytes ?? 0
+  if (await canUseCanonicalShareStatsD1(env)) {
+    try {
+      const aggregate = await env.DB.prepare(
+        `SELECT
+          COUNT(*) AS inlineShareCount,
+          COALESCE(SUM(size), 0) AS inlineBytes
+        FROM shares
+        WHERE storage_type = 'kv'`
+      ).first<{ inlineShareCount: number; inlineBytes: number }>()
+      inlineShareCount = aggregate?.inlineShareCount ?? 0
+      inlineBytes = aggregate?.inlineBytes ?? 0
+    } catch (error) {
+      if (!shouldUseLegacyFallback(error)) {
+        throw error
+      }
+    }
   }
 
   let r2ObjectCount = 0
