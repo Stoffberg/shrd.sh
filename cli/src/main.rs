@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -14,6 +14,7 @@ use std::time::Instant;
 const DEFAULT_BASE_URL: &str = "https://shrd.stoff.dev";
 const KEY_LEN: usize = 32;
 const GENERATED_ID_LEN: usize = 6;
+const MAX_HISTORY_ITEMS: usize = 50;
 
 fn encrypt_content(plaintext: &[u8]) -> Result<(Vec<u8>, String)> {
     let rng = SystemRandom::new();
@@ -130,10 +131,17 @@ fn looks_like_share_reference(input: &str) -> bool {
     id.len() == GENERATED_ID_LEN && is_valid_share_id(&id)
 }
 
-#[derive(Parser)]
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum ShareMode {
+    Temporary,
+    Private,
+    Permanent,
+}
+
+#[derive(Debug, Parser)]
 #[command(name = "shrd")]
 #[command(about = "Share anything, instantly", long_about = None)]
-#[command(version)]
+#[command(version, disable_version_flag = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -164,8 +172,19 @@ struct Cli {
     #[arg(short, long, global = true, help = "Custom name/slug")]
     name: Option<String>,
 
+    #[arg(
+        long,
+        value_enum,
+        global = true,
+        help = "Sharing preset: temporary, private, permanent"
+    )]
+    mode: Option<ShareMode>,
+
     #[arg(short, long, global = true, help = "Output as JSON")]
     json: bool,
+
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version, help = "Print version")]
+    version: Option<bool>,
 
     #[arg(short, long, global = true, help = "Suppress output except errors")]
     quiet: bool,
@@ -180,7 +199,7 @@ struct Cli {
     meta: bool,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     #[command(about = "Share text or a file")]
     Upload {
@@ -192,6 +211,16 @@ enum Commands {
         #[arg(help = "Share ID or URL")]
         id: String,
     },
+    #[command(
+        about = "Show recent shares from local history",
+        visible_alias = "list"
+    )]
+    Recent {
+        #[arg(short, long, default_value_t = 10, help = "How many shares to show")]
+        limit: usize,
+        #[arg(long, help = "Copy the newest share URL")]
+        copy: bool,
+    },
     #[command(about = "Configure shrd settings")]
     Config {
         #[command(subcommand)]
@@ -199,7 +228,7 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum ConfigAction {
     #[command(about = "Set the API base URL (for self-hosted instances)")]
     SetUrl { url: String },
@@ -298,9 +327,26 @@ struct ShareMeta {
     expires_at: Option<String>,
     filename: Option<String>,
     name: Option<String>,
+    burn: Option<bool>,
     #[serde(rename = "storageType")]
     storage_type: Option<String>,
     encrypted: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct HistoryEntry {
+    id: String,
+    url: String,
+    raw_url: String,
+    delete_url: String,
+    delete_token: String,
+    expires_at: Option<String>,
+    name: Option<String>,
+    created_at: u64,
+    source: Option<String>,
+    mode: Option<String>,
+    encrypted: bool,
+    burn: bool,
 }
 
 fn get_base_url() -> String {
@@ -314,6 +360,81 @@ fn get_base_url() -> String {
     }
 
     DEFAULT_BASE_URL.to_string()
+}
+
+fn history_file_path() -> Result<std::path::PathBuf> {
+    Ok(get_config_dir()?.join("history.json"))
+}
+
+fn load_history() -> Result<Vec<HistoryEntry>> {
+    let history_file = history_file_path()?;
+    if !history_file.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = std::fs::read_to_string(history_file)?;
+    let entries = serde_json::from_str(&content).unwrap_or_default();
+    Ok(entries)
+}
+
+fn save_history(entries: &[HistoryEntry]) -> Result<()> {
+    let history_file = history_file_path()?;
+    std::fs::write(history_file, serde_json::to_string_pretty(entries)?)?;
+    Ok(())
+}
+
+fn append_history(entry: HistoryEntry) -> Result<()> {
+    let mut entries = load_history()?;
+    entries.insert(0, entry);
+    entries.truncate(MAX_HISTORY_ITEMS);
+    save_history(&entries)
+}
+
+fn latest_history_entry() -> Result<HistoryEntry> {
+    load_history()?
+        .into_iter()
+        .next()
+        .context("No recent shares yet")
+}
+
+fn resolve_recent_reference(input: &str) -> Result<String> {
+    if input != "last" {
+        return Ok(input.to_string());
+    }
+
+    Ok(latest_history_entry()?.url)
+}
+
+fn mode_label(mode: ShareMode) -> &'static str {
+    match mode {
+        ShareMode::Temporary => "temporary",
+        ShareMode::Private => "private",
+        ShareMode::Permanent => "permanent",
+    }
+}
+
+fn effective_mode(cli: &Cli) -> Option<ShareMode> {
+    cli.mode
+}
+
+fn effective_expire(cli: &Cli) -> Option<String> {
+    if let Some(expire) = &cli.expire {
+        return Some(expire.clone());
+    }
+
+    match effective_mode(cli) {
+        Some(ShareMode::Temporary) => Some("1h".to_string()),
+        Some(ShareMode::Permanent) => Some("never".to_string()),
+        _ => None,
+    }
+}
+
+fn effective_encrypt(cli: &Cli) -> bool {
+    cli.encrypt || matches!(effective_mode(cli), Some(ShareMode::Private))
+}
+
+fn effective_burn(cli: &Cli) -> bool {
+    cli.burn
 }
 
 fn get_config_base_url() -> Option<String> {
@@ -437,11 +558,16 @@ async fn push_content(
     content: String,
     content_type: Option<String>,
     filename: Option<String>,
+    source: Option<String>,
 ) -> Result<()> {
     let client = reqwest::Client::new();
     let base_url = get_base_url();
 
-    let (final_content, encryption_key) = if cli.encrypt {
+    let encrypt = effective_encrypt(cli);
+    let burn = effective_burn(cli);
+    let expire = effective_expire(cli);
+
+    let (final_content, encryption_key) = if encrypt {
         let (encrypted_content, key) = encrypt_content(content.as_bytes())?;
         let encoded_content = base64::engine::general_purpose::STANDARD.encode(&encrypted_content);
         (encoded_content, Some(key))
@@ -451,12 +577,12 @@ async fn push_content(
 
     let request = PushRequest {
         content: final_content,
-        expire: cli.expire.clone(),
-        burn: cli.burn,
+        expire,
+        burn,
         name: cli.name.clone(),
         content_type,
         filename,
-        encrypted: cli.encrypt,
+        encrypted: encrypt,
     };
 
     let body_bytes = serde_json::to_vec(&request)?;
@@ -519,6 +645,7 @@ async fn push_content(
 
     let result: PushResponse = response.json().await?;
     print_result(cli, &result, encryption_key.as_deref());
+    let _ = record_history(cli, &result, encryption_key.as_deref(), source);
 
     Ok(())
 }
@@ -548,7 +675,11 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     let file_content =
         std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
 
-    let (upload_content, encryption_key, content_size) = if cli.encrypt {
+    let encrypt = effective_encrypt(cli);
+    let burn = effective_burn(cli);
+    let expire = effective_expire(cli);
+
+    let (upload_content, encryption_key, content_size) = if encrypt {
         let (encrypted, key) = encrypt_content(&file_content)?;
         let size = encrypted.len() as u64;
         (encrypted, Some(key), size)
@@ -598,13 +729,13 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
         .header("X-Content-Type", &content_type)
         .header("X-Filename", filename);
 
-    if cli.burn {
+    if burn {
         req = req.header("X-Burn", "true");
     }
-    if cli.encrypt {
+    if encrypt {
         req = req.header("X-Encrypted", "true");
     }
-    if let Some(ref expire) = cli.expire {
+    if let Some(ref expire) = expire {
         req = req.header("X-Expire", expire);
     }
     if let Some(ref name) = cli.name {
@@ -629,6 +760,12 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
 
     let result: PushResponse = response.json().await?;
     print_result(cli, &result, encryption_key.as_deref());
+    let _ = record_history(
+        cli,
+        &result,
+        encryption_key.as_deref(),
+        Some(path.to_string()),
+    );
     Ok(())
 }
 
@@ -653,7 +790,11 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     let file_content =
         std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
 
-    let (upload_content, encryption_key, content_size) = if cli.encrypt {
+    let encrypt = effective_encrypt(cli);
+    let burn = effective_burn(cli);
+    let expire = effective_expire(cli);
+
+    let (upload_content, encryption_key, content_size) = if encrypt {
         let (encrypted, key) = encrypt_content(&file_content)?;
         let size = encrypted.len() as u64;
         (encrypted, Some(key), size)
@@ -666,13 +807,13 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
         .header("X-Content-Type", &content_type)
         .header("X-Filename", filename);
 
-    if cli.burn {
+    if burn {
         init_req = init_req.header("X-Burn", "true");
     }
-    if cli.encrypt {
+    if encrypt {
         init_req = init_req.header("X-Encrypted", "true");
     }
-    if let Some(ref expire) = cli.expire {
+    if let Some(ref expire) = expire {
         init_req = init_req.header("X-Expire", expire);
     }
     if let Some(ref name) = cli.name {
@@ -781,17 +922,72 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
 
     let result: PushResponse = complete_response.json().await?;
     print_result(cli, &result, encryption_key.as_deref());
+    let _ = record_history(
+        cli,
+        &result,
+        encryption_key.as_deref(),
+        Some(path.to_string()),
+    );
     Ok(())
 }
 
-fn print_result(cli: &Cli, result: &PushResponse, encryption_key: Option<&str>) {
-    let (url, raw_url) = match encryption_key {
+fn resolve_result_urls(result: &PushResponse, encryption_key: Option<&str>) -> (String, String) {
+    match encryption_key {
         Some(key) => (
             format!("{}#{}", result.url, key),
             format!("{}#{}", result.raw_url, key),
         ),
         None => (result.url.clone(), result.raw_url.clone()),
-    };
+    }
+}
+
+fn summarize_share(result: &PushResponse, cli: &Cli) -> String {
+    let mut labels = Vec::new();
+    if let Some(mode) = effective_mode(cli) {
+        labels.push(mode_label(mode).to_string());
+    }
+    if effective_encrypt(cli) && effective_mode(cli) != Some(ShareMode::Private) {
+        labels.push("encrypted".to_string());
+    }
+    if effective_burn(cli) {
+        labels.push("burn".to_string());
+    }
+    if let Some(name) = &result.name {
+        labels.push(format!("named {}", name));
+    }
+    if let Some(expires_at) = &result.expires_at {
+        labels.push(format!("expires {}", expires_at));
+    } else {
+        labels.push("never expires".to_string());
+    }
+    labels.join(" · ")
+}
+
+fn record_history(
+    cli: &Cli,
+    result: &PushResponse,
+    encryption_key: Option<&str>,
+    source: Option<String>,
+) -> Result<()> {
+    let (url, raw_url) = resolve_result_urls(result, encryption_key);
+    append_history(HistoryEntry {
+        id: result.id.clone(),
+        url,
+        raw_url,
+        delete_url: result.delete_url.clone(),
+        delete_token: result.delete_token.clone(),
+        expires_at: result.expires_at.clone(),
+        name: result.name.clone(),
+        created_at: unix_now(),
+        source,
+        mode: effective_mode(cli).map(|mode| mode_label(mode).to_string()),
+        encrypted: effective_encrypt(cli),
+        burn: effective_burn(cli),
+    })
+}
+
+fn print_result(cli: &Cli, result: &PushResponse, encryption_key: Option<&str>) {
+    let (url, raw_url) = resolve_result_urls(result, encryption_key);
 
     if cli.json {
         println!(
@@ -809,12 +1005,21 @@ fn print_result(cli: &Cli, result: &PushResponse, encryption_key: Option<&str>) 
         );
     } else if !cli.quiet {
         println!("{} {}", "→".green(), url.cyan());
+        eprintln!("{}", summarize_share(result, cli).dimmed());
         if !cli.no_copy {
             if copy_to_clipboard(&url).is_ok() {
                 eprintln!("{}", "(copied to clipboard)".dimmed());
             }
         }
     }
+}
+
+fn unix_now() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn is_binary_content_type(content_type: &str) -> bool {
@@ -859,12 +1064,81 @@ fn get_unique_filename(filename: &str) -> String {
     )
 }
 
+fn format_history_age(created_at: u64) -> String {
+    let now = unix_now();
+    let diff = now.saturating_sub(created_at);
+    if diff < 60 {
+        return "just now".to_string();
+    }
+    if diff < 3600 {
+        return format!("{}m ago", diff / 60);
+    }
+    if diff < 86400 {
+        return format!("{}h ago", diff / 3600);
+    }
+    format!("{}d ago", diff / 86400)
+}
+
+fn print_recent_shares(cli: &Cli, limit: usize, copy: bool) -> Result<()> {
+    let entries = load_history()?;
+    if entries.is_empty() {
+        if cli.json {
+            println!("[]");
+        } else {
+            println!("No recent shares yet.");
+        }
+        return Ok(());
+    }
+
+    if copy {
+        let latest = &entries[0];
+        copy_to_clipboard(&latest.url)?;
+        println!("{} {}", "→".green(), latest.url.cyan());
+        return Ok(());
+    }
+
+    let shown_entries: Vec<HistoryEntry> = entries.into_iter().take(limit).collect();
+
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&shown_entries)?);
+        return Ok(());
+    }
+
+    println!(
+        "{:<3} {:<18} {:<12} {:<10} {:<12} {}",
+        "#", "share", "mode", "age", "source", "url"
+    );
+    for (index, entry) in shown_entries.into_iter().enumerate() {
+        let label = entry.name.unwrap_or(entry.id);
+        let mode = entry.mode.unwrap_or_else(|| {
+            if entry.encrypted {
+                "encrypted".to_string()
+            } else {
+                "default".to_string()
+            }
+        });
+        let source = entry.source.unwrap_or_else(|| "inline".to_string());
+        println!(
+            "{:<3} {:<18} {:<12} {:<10} {:<12} {}",
+            index + 1,
+            label,
+            mode,
+            format_history_age(entry.created_at),
+            source,
+            entry.url
+        );
+    }
+
+    Ok(())
+}
+
 async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
     let client = reqwest::Client::new();
     let base_url = get_base_url();
-    let (raw_id, decryption_key) = parse_id_and_key(id);
+    let resolved_reference = resolve_recent_reference(id)?;
+    let (raw_id, decryption_key) = parse_id_and_key(&resolved_reference);
     let id = normalize_share_id(&raw_id);
 
     if cli.meta {
@@ -1022,14 +1296,21 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
 async fn upload_from_source(cli: &Cli, input: Option<&str>) -> Result<()> {
     if cli.clipboard {
         let content = get_clipboard()?;
-        return push_content(cli, content, None, None).await;
+        return push_content(cli, content, None, None, Some("clipboard".to_string())).await;
     }
 
     if let Some(input) = input {
         if std::path::Path::new(input).exists() {
             return upload_file_streaming(cli, input).await;
         }
-        return push_content(cli, input.to_string(), None, None).await;
+        return push_content(
+            cli,
+            input.to_string(),
+            None,
+            None,
+            Some("inline".to_string()),
+        )
+        .await;
     }
 
     if atty::isnt(atty::Stream::Stdin) {
@@ -1038,7 +1319,7 @@ async fn upload_from_source(cli: &Cli, input: Option<&str>) -> Result<()> {
         if content.is_empty() {
             anyhow::bail!("No content provided");
         }
-        return push_content(cli, content, None, None).await;
+        return push_content(cli, content, None, None, Some("stdin".to_string())).await;
     }
 
     println!("{}", "Usage: shrd [OPTIONS] [INPUT]".yellow());
@@ -1054,6 +1335,10 @@ async fn upload_from_source(cli: &Cli, input: Option<&str>) -> Result<()> {
         "shrd".dimmed()
     );
     println!("  {} get abc123         # Retrieve by ID", "shrd".dimmed());
+    println!(
+        "  {} recent             # Show recent shares",
+        "shrd".dimmed()
+    );
     println!("  {} -c                 # Share clipboard", "shrd".dimmed());
     println!();
     println!("Run {} for more options.", "shrd --help".cyan());
@@ -1070,6 +1355,7 @@ async fn main() -> Result<()> {
             return upload_from_source(&cli, input.as_deref()).await
         }
         Some(Commands::Get { id }) => return pull_content(&cli, id).await,
+        Some(Commands::Recent { limit, copy }) => return print_recent_shares(&cli, *limit, *copy),
         Some(Commands::Config { action }) => {
             match action {
                 ConfigAction::SetUrl { url } => {
@@ -1079,9 +1365,11 @@ async fn main() -> Result<()> {
                 ConfigAction::Show => {
                     let base_url = get_base_url();
                     let config_dir = get_config_dir()?;
+                    let history_count = load_history().map(|entries| entries.len()).unwrap_or(0);
                     println!("Configuration:");
                     println!("  Base URL: {}", base_url.cyan());
                     println!("  Config dir: {}", config_dir.display());
+                    println!("  Recent shares: {}", history_count);
                 }
                 ConfigAction::Reset => {
                     let config_dir = get_config_dir()?;
@@ -1285,5 +1573,32 @@ mod tests {
             }
             _ => panic!("expected get command"),
         }
+    }
+
+    #[test]
+    fn cli_supports_recent_alias() {
+        let cli = Cli::try_parse_from(["shrd", "list", "--limit", "5"]).expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Recent { limit, copy }) => {
+                assert_eq!(limit, 5);
+                assert!(!copy);
+            }
+            _ => panic!("expected recent command"),
+        }
+    }
+
+    #[test]
+    fn cli_supports_mode_flag() {
+        let cli = Cli::try_parse_from(["shrd", "--mode", "permanent", "notes.txt"])
+            .expect("cli should parse");
+
+        assert_eq!(cli.mode, Some(ShareMode::Permanent));
+    }
+
+    #[test]
+    fn lowercase_v_is_version_flag() {
+        let err = Cli::try_parse_from(["shrd", "-v"]).expect_err("version should exit early");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
     }
 }

@@ -5,17 +5,25 @@ import { useState } from "react";
 type Share = {
   id: string;
   content: string;
+  url: string;
+  rawUrl: string;
+  name?: string;
   filename?: string;
+  contentType: string;
   language?: string;
   expiresAt?: string;
   createdAt: string;
+  burn: boolean;
+  encrypted: boolean;
+  views: number;
   highlighted?: string;
 };
 
 const fetchShare = createServerFn({ method: "GET" })
   .validator((id: string) => id)
   .handler(async ({ data: id }) => {
-    const apiUrl = "https://shrd-api.plutocrat.workers.dev";
+    const apiUrl = process.env.API_URL ?? "https://shrd.stoff.dev";
+    const publicUrl = process.env.PUBLIC_BASE_URL ?? "https://shrd.stoff.dev";
 
     const metaResponse = await fetch(`${apiUrl}/${id}/meta`);
 
@@ -37,10 +45,22 @@ const fetchShare = createServerFn({ method: "GET" })
     const share: Share = {
       id: meta.id,
       content,
+      url: `${publicUrl}/${meta.id}`,
+      rawUrl: `${publicUrl}/${meta.id}/raw`,
+      name: meta.name ?? undefined,
       filename: meta.filename,
-      language: meta.contentType === "json" ? "json" : meta.contentType === "markdown" ? "markdown" : "text",
+      contentType: meta.contentType,
+      language:
+        meta.contentType === "application/json"
+          ? "json"
+          : meta.contentType === "text/markdown"
+            ? "markdown"
+            : "text",
       expiresAt: meta.expiresAt,
       createdAt: meta.createdAt,
+      burn: meta.burn === true,
+      encrypted: meta.encrypted === true,
+      views: typeof meta.views === "number" ? meta.views : 0,
     };
 
     try {
@@ -90,43 +110,70 @@ function SharePage() {
   const expiresAt = share.expiresAt ? new Date(share.expiresAt) : null;
   const isExpiringSoon =
     expiresAt && expiresAt.getTime() - Date.now() < 3600000;
+  const shareLabel = share.name ?? share.filename ?? share.id;
+  const badges = [
+    share.name ? "Named share" : "Quick share",
+    share.encrypted ? "Encrypted" : null,
+    share.burn ? "View once" : null,
+    expiresAt ? (isExpiringSoon ? "Expires soon" : "Timed") : "Permanent",
+    `${share.views} ${share.views === 1 ? "view" : "views"}`,
+  ].filter(Boolean);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
-      <div className="mb-4 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          {share.filename && (
-            <span className="font-mono text-sm text-zinc-400">
-              {share.filename}
-            </span>
-          )}
-          {share.language && (
-            <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-xs text-zinc-400">
-              {share.language}
-            </span>
-          )}
+      <div className="mb-6 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                Share
+              </p>
+              <h1 className="font-mono text-lg text-zinc-100">{shareLabel}</h1>
+              <p className="text-sm text-zinc-400">
+                {share.contentType}
+                {share.filename ? ` · ${share.filename}` : ""}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {badges.map((badge) => (
+                <span
+                  key={badge}
+                  className="rounded-full border border-zinc-700 bg-zinc-950 px-2.5 py-1 text-xs text-zinc-300"
+                >
+                  {badge}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleCopy}
+              className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:border-zinc-600 hover:text-zinc-100"
+              title="Copy to clipboard (c)"
+            >
+              {copied ? "Copied!" : "Copy"}
+            </button>
+            <a
+              href={share.rawUrl}
+              className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:border-zinc-600 hover:text-zinc-100"
+            >
+              Raw
+            </a>
+            <button
+              onClick={handleDownload}
+              className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:border-zinc-600 hover:text-zinc-100"
+              title="Download (d)"
+            >
+              Download
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleCopy}
-            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:border-zinc-600 hover:text-zinc-100"
-            title="Copy to clipboard (c)"
-          >
-            {copied ? "Copied!" : "Copy"}
-          </button>
-          <a
-            href={`/raw/${share.id}`}
-            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:border-zinc-600 hover:text-zinc-100"
-          >
-            Raw
+        <div className="mt-4 flex flex-wrap gap-6 text-sm text-zinc-400">
+          <span>Created {new Date(share.createdAt).toLocaleString()}</span>
+          <span>{expiresAt ? `Expires ${expiresAt.toLocaleString()}` : "No automatic expiry"}</span>
+          <a href={share.url} className="font-mono text-zinc-500 hover:text-zinc-300">
+            {share.url}
           </a>
-          <button
-            onClick={handleDownload}
-            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:border-zinc-600 hover:text-zinc-100"
-            title="Download (d)"
-          >
-            Download
-          </button>
         </div>
       </div>
 

@@ -54,10 +54,36 @@ export function isBinaryContent(contentType: string): boolean {
   )
 }
 
+function renderStatusBadges(metadata: ContentMetadata): string {
+  const badges = [
+    metadata.name ? "named share" : "quick share",
+    metadata.encrypted ? "encrypted" : null,
+    metadata.maxViews !== undefined ? "view once" : null,
+    metadata.expiresAt ? `expires ${formatDate(metadata.expiresAt)}` : "permanent",
+  ].filter(Boolean)
+
+  return `<div class="badges">${badges
+    .map((badge) => `<span class="badge">${badge}</span>`)
+    .join("")}</div>`
+}
+
+function renderMetaLine(metadata: ContentMetadata): string {
+  const label = metadata.filename ?? metadata.name ?? metadata.id
+  const parts = [label, formatSize(metadata.size), metadata.expiresAt ? `expires ${formatDate(metadata.expiresAt)}` : "never expires"]
+  if (metadata.encrypted) {
+    parts.push("encrypted")
+  }
+  if (metadata.maxViews !== undefined) {
+    parts.push("view once")
+  }
+  return parts.join(" · ")
+}
+
 export function renderBinaryPage(metadata: ContentMetadata, baseUrl: string): string {
   const isBurn = metadata.maxViews !== undefined
   const viewsLeft = isBurn ? metadata.maxViews! - metadata.views - 1 : null
   const isLastView = viewsLeft === 0
+  const shareUrl = `${baseUrl}/${metadata.id}`
   const rawUrl = `${baseUrl}/${metadata.id}/raw`
   const contentType = metadata.contentType
   const isEncrypted = metadata.encrypted === true
@@ -139,6 +165,20 @@ export function renderBinaryPage(metadata: ContentMetadata, baseUrl: string): st
       border-color: #991b1b;
       color: #f87171;
     }
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .badge {
+      border: 1px solid #404040;
+      border-radius: 999px;
+      background: #171717;
+      color: #d4d4d4;
+      font-size: 0.75rem;
+      padding: 0.25rem 0.65rem;
+    }
     .media {
       max-width: 100%;
       max-height: 80vh;
@@ -193,10 +233,11 @@ export function renderBinaryPage(metadata: ContentMetadata, baseUrl: string): st
 <body>
   <div class="container">
     <div class="header">
-      <span class="url">${rawUrl}</span>
+      <span class="url">${shareUrl}</span>
       <button class="btn" onclick="copyUrl()">Copy Link</button>
       <a href="${rawUrl}" download class="btn">Download</a>
     </div>
+    ${renderStatusBadges(metadata)}
     ${isBurn ? `
     <div class="warning${isLastView ? ' last' : ''}">
       ${isLastView 
@@ -206,13 +247,13 @@ export function renderBinaryPage(metadata: ContentMetadata, baseUrl: string): st
     ` : ''}
     ${mediaElement}
     <div class="meta">
-      ${metadata.filename ? `${metadata.filename} · ` : ''}${formatSize(metadata.size)}${metadata.expiresAt ? ` · expires ${formatDate(metadata.expiresAt)}` : ''}
+      ${renderMetaLine(metadata)}
     </div>
   </div>
   <div class="copied" id="copied">Copied!</div>
   <script>
     function copyUrl() {
-      navigator.clipboard.writeText('${rawUrl}');
+      navigator.clipboard.writeText(window.location.href);
       const el = document.getElementById('copied');
       el.classList.add('show');
       setTimeout(() => el.classList.remove('show'), 1500);
@@ -293,6 +334,20 @@ function renderEncryptedBinaryPage(
       background: #450a0a;
       border-color: #991b1b;
       color: #f87171;
+    }
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .badge {
+      border: 1px solid #404040;
+      border-radius: 999px;
+      background: #171717;
+      color: #d4d4d4;
+      font-size: 0.75rem;
+      padding: 0.25rem 0.65rem;
     }
     .media {
       max-width: 100%;
@@ -384,6 +439,7 @@ function renderEncryptedBinaryPage(
       <button class="btn" onclick="copyUrl()">Copy Link</button>
       <button class="btn" id="download-header-btn" onclick="downloadFile()" disabled>Download</button>
     </div>
+    ${renderStatusBadges(metadata)}
     ${isBurn ? `
     <div class="warning${isLastView ? ' last' : ''}">
       ${isLastView 
@@ -401,7 +457,7 @@ function renderEncryptedBinaryPage(
     </div>
     <div id="content"></div>
     <div class="meta">
-      ${metadata.filename ? `${metadata.filename} · ` : ''}${formatSize(metadata.size)}${metadata.expiresAt ? ` · expires ${formatDate(metadata.expiresAt)}` : ''} · encrypted
+      ${renderMetaLine(metadata)}
     </div>
   </div>
   <div class="copied" id="copied">Copied!</div>
@@ -478,6 +534,7 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
   const isBurn = metadata.maxViews !== undefined
   const viewsLeft = isBurn ? metadata.maxViews! - metadata.views - 1 : null
   const isLastView = viewsLeft === 0
+  const shareUrl = `${baseUrl}/${metadata.id}`
   const rawUrl = `${baseUrl}/${metadata.id}/raw`
   const isEncrypted = metadata.encrypted === true
 
@@ -547,6 +604,20 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
       background: #450a0a;
       border-color: #991b1b;
       color: #f87171;
+    }
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .badge {
+      border: 1px solid #404040;
+      border-radius: 999px;
+      background: #171717;
+      color: #d4d4d4;
+      font-size: 0.75rem;
+      padding: 0.25rem 0.65rem;
     }
     .content {
       background: #171717;
@@ -619,10 +690,12 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
 <body>
   <div class="container">
     <div class="header">
-      <span class="url">${rawUrl}</span>
+      <span class="url">${shareUrl}</span>
       <button class="btn" onclick="copyUrl()">Copy Link</button>
+      <a href="${rawUrl}" class="btn">Raw</a>
       <button class="btn" onclick="copyContent()">Copy Content</button>
     </div>
+    ${renderStatusBadges(metadata)}
     ${isBurn ? `
     <div class="warning${isLastView ? ' last' : ''}">
       ${isLastView 
@@ -632,7 +705,7 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
     ` : ''}
     <div class="content" id="content"><pre>${escaped}</pre></div>
     <div class="meta">
-      ${metadata.filename ? `${metadata.filename} · ` : ''}${formatSize(metadata.size)}${metadata.expiresAt ? ` · expires ${formatDate(metadata.expiresAt)}` : ''}
+      ${renderMetaLine(metadata)}
     </div>
   </div>
   <div class="copied" id="copied">Copied!</div>
@@ -660,7 +733,7 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
     }
     
     function copyUrl() {
-      navigator.clipboard.writeText('${rawUrl}');
+      navigator.clipboard.writeText(window.location.href);
       showCopied();
     }
     
@@ -748,6 +821,20 @@ function renderEncryptedContentPage(
       background: #450a0a;
       border-color: #991b1b;
       color: #f87171;
+    }
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .badge {
+      border: 1px solid #404040;
+      border-radius: 999px;
+      background: #171717;
+      color: #d4d4d4;
+      font-size: 0.75rem;
+      padding: 0.25rem 0.65rem;
     }
     .content {
       background: #171717;
@@ -853,6 +940,7 @@ function renderEncryptedContentPage(
       <button class="btn" onclick="copyUrl()">Copy Link</button>
       <button class="btn" id="copy-content-btn" onclick="copyContent()" disabled>Copy Content</button>
     </div>
+    ${renderStatusBadges(metadata)}
     ${isBurn ? `
     <div class="warning${isLastView ? ' last' : ''}">
       ${isLastView 
@@ -870,7 +958,7 @@ function renderEncryptedContentPage(
     </div>
     <div class="content" id="content"></div>
     <div class="meta">
-      ${metadata.filename ? `${metadata.filename} · ` : ''}${formatSize(metadata.size)}${metadata.expiresAt ? ` · expires ${formatDate(metadata.expiresAt)}` : ''} · encrypted
+      ${renderMetaLine(metadata)}
     </div>
   </div>
   <div class="copied" id="copied">Copied!</div>

@@ -13,7 +13,7 @@ function HomePage() {
         </h1>
         <p className="mx-auto mt-6 max-w-2xl text-lg text-zinc-400">
           CLI-first content sharing for developers. Paste code, share files,
-          collaborate fast. Everything expires automatically.
+          collaborate fast. Default to temporary, keep the good stuff around when it matters.
         </p>
         <div className="mt-10 flex justify-center gap-4">
           <a
@@ -58,15 +58,27 @@ function HomePage() {
               {"\n"}
               <span className="text-zinc-500">→</span> https://shrd.sh/abc123
               {"\n\n"}
+              <span className="text-zinc-500"># Keep it forever</span>
+              {"\n"}
+              <span className="text-emerald-400">$</span> shrd --mode permanent --name runbook ./docs.md
+              {"\n"}
+              <span className="text-zinc-500">→</span> https://shrd.sh/runbook
+              {"\n\n"}
               <span className="text-zinc-500"># Pipe from stdin</span>
               {"\n"}
               <span className="text-emerald-400">$</span> cat logs.txt | shrd
               {"\n"}
               <span className="text-zinc-500">→</span> https://shrd.sh/xyz789
               {"\n\n"}
-              <span className="text-zinc-500"># Set expiry</span>
+              <span className="text-zinc-500"># Temporary private drop</span>
               {"\n"}
-              <span className="text-emerald-400">$</span> shrd upload --expires 1h ./data.json
+              <span className="text-emerald-400">$</span> shrd --mode temporary -e ./data.json
+              {"\n\n"}
+              <span className="text-zinc-500"># Recall the last share</span>
+              {"\n"}
+              <span className="text-emerald-400">$</span> shrd list
+              {"\n"}
+              <span className="text-emerald-400">$</span> shrd get last
             </code>
           </pre>
         </div>
@@ -88,6 +100,10 @@ function HomePage() {
           <FeatureCard
             title="Private"
             description="End-to-end encryption optional. Retention is configurable, including never."
+          />
+          <FeatureCard
+            title="Recallable"
+            description="Local recent-share history means yesterday's link is still one command away."
           />
           <FeatureCard
             title="Syntax Highlighting"

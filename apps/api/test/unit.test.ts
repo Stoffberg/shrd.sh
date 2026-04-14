@@ -412,6 +412,49 @@ describe("Get content endpoints", () => {
     expect(html).toContain("Copy Link")
   })
 
+  it("includes product metadata on HTML share pages", async () => {
+    const createRes = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "launch checklist",
+        name: "release_notes",
+        expire: "never",
+        encrypted: true,
+        burn: true,
+      }),
+    }, env)
+
+    const created = await createRes.json() as JsonResponse
+    const htmlRes = await app.request(`/${created.id}`, {
+      headers: { "Accept": "text/html" },
+    }, env)
+
+    expect(htmlRes.status).toBe(200)
+    const html = await htmlRes.text()
+    expect(html).toContain("named share")
+    expect(html).toContain("encrypted")
+    expect(html).toContain("view once")
+    expect(html).toContain("permanent")
+    expect(html).toContain("never expires")
+  })
+
+  it("exposes burn metadata for the CLI and web clients", async () => {
+    const createRes = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "burn flag",
+        burn: true,
+      }),
+    }, env)
+
+    const created = await createRes.json() as JsonResponse
+    const metaRes = await app.request(`/${created.id}/meta`, {}, env)
+    const meta = await metaRes.json() as JsonResponse
+    expect(meta.burn).toBe(true)
+  })
+
   it("returns 404 for non-existent content", async () => {
     const res = await app.request("/nonexistent123/raw", {}, env)
     

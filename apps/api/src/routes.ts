@@ -262,6 +262,7 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
       createdAt: metadata.createdAt,
       expiresAt: metadata.expiresAt,
       views: metadata.views,
+      burn: metadata.maxViews !== undefined,
       name: metadata.name ?? null,
       filename: metadata.filename,
       storageType: metadata.storageType,
