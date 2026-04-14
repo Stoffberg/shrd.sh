@@ -12,7 +12,9 @@ const KV_SIZE_LIMIT = 25 * 1024
 const CANONICAL_PREFIX = "canonical:"
 const LEGACY_PREFIX = "content:"
 const MULTIPART_PREFIX = "multipart:"
+const TOMBSTONE_PREFIX = "deleted:"
 const SESSION_TTL_SECONDS = 60 * 60
+const TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
 
 type CanonicalRow = {
   id: string
@@ -93,6 +95,18 @@ async function getJson<T>(env: Env, key: string): Promise<T | null> {
   return env.CONTENT.get<T>(key, "json")
 }
 
+async function isDeleted(env: Env, id: string): Promise<boolean> {
+  return Boolean(await env.CONTENT.get(`${TOMBSTONE_PREFIX}${id}`))
+}
+
+async function clearDeleted(env: Env, id: string): Promise<void> {
+  await env.CONTENT.delete(`${TOMBSTONE_PREFIX}${id}`)
+}
+
+async function markDeleted(env: Env, id: string): Promise<void> {
+  await env.CONTENT.put(`${TOMBSTONE_PREFIX}${id}`, "1", { expirationTtl: TOMBSTONE_TTL_SECONDS })
+}
+
 function inferShareKind(contentType: string): ShareKind {
   if (contentType === "application/json") {
     return "json"
@@ -146,6 +160,10 @@ function toCanonicalMetadata(row: CanonicalRow): CanonicalContentMetadata {
 }
 
 async function getCanonicalRow(env: Env, id: string): Promise<CanonicalRow | null> {
+  if (await isDeleted(env, id)) {
+    return null
+  }
+
   if (await canUseCanonicalD1(env)) {
     try {
       const row = await env.DB.prepare(
@@ -223,6 +241,10 @@ async function getCanonicalRow(env: Env, id: string): Promise<CanonicalRow | nul
 }
 
 async function getLegacyStored(env: Env, id: string): Promise<StoredContent | null> {
+  if (await isDeleted(env, id)) {
+    return null
+  }
+
   const stored = await getJson<StoredContent>(env, `${LEGACY_PREFIX}${id}`)
   if (!stored?.metadata) {
     return null
@@ -388,6 +410,7 @@ export async function storeContent(
         metadata.expiresAt,
         metadata.createdAt
       ).run()
+      await clearDeleted(env, id)
       return
     } catch (error) {
       if (!shouldUseLegacyFallback(error)) {
@@ -408,6 +431,7 @@ export async function storeContent(
       JSON.stringify(buildStoredContent(metadata)),
       ttlOptions(metadata.expiresAt)
     )
+    await clearDeleted(env, id)
     return
   }
 
@@ -416,6 +440,7 @@ export async function storeContent(
     JSON.stringify(buildStoredContent(metadata, content)),
     ttlOptions(metadata.expiresAt)
   )
+  await clearDeleted(env, id)
 }
 
 export async function storeBlobMetadata(
@@ -468,6 +493,7 @@ export async function storeBlobMetadata(
         metadata.expiresAt,
         metadata.createdAt
       ).run()
+      await clearDeleted(env, metadata.id)
       return
     } catch (error) {
       if (!shouldUseLegacyFallback(error)) {
@@ -481,6 +507,7 @@ export async function storeBlobMetadata(
     JSON.stringify(buildStoredContent(metadata)),
     ttlOptions(metadata.expiresAt)
   )
+  await clearDeleted(env, metadata.id)
 }
 
 export async function getContent(
@@ -631,11 +658,14 @@ export async function incrementViews(
 
 export async function deleteContent(env: Env, id: string): Promise<boolean> {
   const deletedCanonical = await deleteCanonicalShare(env, id)
-  if (deletedCanonical) {
-    return true
+  const deletedLegacy = await deleteLegacyContent(env, id)
+
+  if (!deletedCanonical && !deletedLegacy) {
+    return false
   }
 
-  return deleteLegacyContent(env, id)
+  await markDeleted(env, id)
+  return true
 }
 
 export async function validateDeleteToken(

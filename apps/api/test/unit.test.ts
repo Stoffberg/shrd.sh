@@ -150,6 +150,123 @@ function createLegacySchemaEnv(): Env {
   return env
 }
 
+function createStaleDeleteEnv(): Env {
+  const kvStore = new Map<string, string>()
+  const shares = new Map<string, Record<string, unknown>>()
+  const staleShares = new Map<string, Record<string, unknown>>()
+
+  return {
+    BASE_URL: "https://test.shrd.sh",
+    CONTENT: {
+      get: vi.fn(async (key: string, format?: string) => {
+        const value = kvStore.get(key)
+        if (!value) return null
+        if (format === "json") return JSON.parse(value)
+        return value
+      }),
+      put: vi.fn(async (key: string, value: string) => {
+        kvStore.set(key, value)
+      }),
+      delete: vi.fn(async (key: string) => {
+        kvStore.delete(key)
+      }),
+    } as unknown as KVNamespace,
+    STORAGE: {
+      get: vi.fn(async () => null),
+      put: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+      list: vi.fn(async () => ({ objects: [], truncated: false })),
+      createMultipartUpload: vi.fn(),
+      resumeMultipartUpload: vi.fn(),
+    } as unknown as R2Bucket,
+    DB: {
+      prepare: vi.fn((query: string) => {
+        let bindings: unknown[] = []
+        return {
+          bind: vi.fn(function (this: unknown, ...values: unknown[]) {
+            bindings = values
+            return this
+          }),
+          first: vi.fn(async () => {
+            if (query.includes("FROM shares") && query.includes("LIMIT 1") && !query.includes("WHERE id = ?")) {
+              return null
+            }
+
+            if (query.includes("FROM shares") && query.includes("WHERE id = ?")) {
+              const id = bindings[0] as string
+              return shares.get(id) ?? staleShares.get(id) ?? null
+            }
+
+            throw new Error("D1_ERROR: no such table: daily_metrics")
+          }),
+          run: vi.fn(async () => {
+            if (query.includes("INSERT INTO shares")) {
+              const [
+                id,
+                type,
+                name,
+                size,
+                views,
+                burned,
+                encrypted,
+                storageKey,
+                storageType,
+                deleteToken,
+                contentType,
+                filename,
+                maxViews,
+                inlineBody,
+                inlineBodyEncoding,
+                lastAccessedAt,
+                expiresAt,
+                createdAt,
+              ] = bindings
+
+              shares.set(id as string, {
+                id,
+                type,
+                name,
+                size,
+                views,
+                burned,
+                encrypted,
+                storageKey,
+                storageType,
+                deleteToken,
+                contentType,
+                filename,
+                maxViews,
+                inlineBody,
+                inlineBodyEncoding,
+                lastAccessedAt,
+                expiresAt,
+                createdAt,
+              })
+              staleShares.delete(id as string)
+              return
+            }
+
+            if (query.includes("DELETE FROM shares WHERE id = ?")) {
+              const id = bindings[0] as string
+              const row = shares.get(id)
+              if (row) {
+                shares.delete(id)
+                staleShares.set(id, row)
+              }
+              return
+            }
+
+            throw new Error("D1_ERROR: no such table: daily_metrics")
+          }),
+          all: vi.fn(async () => {
+            throw new Error("D1_ERROR: no such table: daily_metrics")
+          }),
+        }
+      }),
+    } as unknown as D1Database,
+  }
+}
+
 describe("Health endpoint", () => {
   it("returns status ok", async () => {
     const env = createMockEnv()
@@ -900,6 +1017,26 @@ describe("Delete endpoint", () => {
 
     const getRes = await app.request(`/${testId}/raw`, {}, env)
     expect(getRes.status).toBe(404)
+  })
+
+  it("hides deleted content even if D1 briefly returns a stale row", async () => {
+    const staleEnv = createStaleDeleteEnv()
+    const pushRes = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Delete me twice" }),
+    }, staleEnv)
+
+    const pushBody = await pushRes.json() as JsonResponse
+    const res = await app.request(`/api/v1/${pushBody.id as string}`, {
+      method: "DELETE",
+      headers: { "Authorization": `Bearer ${pushBody.deleteToken as string}` },
+    }, staleEnv)
+
+    expect(res.status).toBe(200)
+
+    const metaRes = await app.request(`/${pushBody.id as string}/meta`, {}, staleEnv)
+    expect(metaRes.status).toBe(404)
   })
 
   it("rejects delete without auth", async () => {
