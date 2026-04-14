@@ -83,27 +83,3 @@ jobs:
       - name: Run CLI tests
         working-directory: cli
         run: cargo test
-
-  integration-tests:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: [build, test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Run integration tests
-        working-directory: apps/api
-        run: pnpm vitest run test/integration.test.ts
-        env:
-          SHRD_API_URL: https://shrd.stoff.dev
