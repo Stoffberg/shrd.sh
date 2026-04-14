@@ -32,7 +32,7 @@ const fetchUserShares = createServerFn({ method: "GET" }).handler(async () => {
 });
 
 const deleteShare = createServerFn({ method: "POST" })
-  .validator((id: string) => id)
+  .inputValidator((id: string) => id)
   .handler(async ({ data: id }) => {
     const apiUrl = process.env.API_URL ?? "http://localhost:8787";
 

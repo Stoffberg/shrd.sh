@@ -13,7 +13,7 @@ export const Route = createRootRoute({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "shrd.sh - Share anything, instantly" },
+      { title: "shrd.sh" },
       {
         name: "description",
         content: "CLI-first content sharing. Fast, private, ephemeral.",
@@ -21,6 +21,15 @@ export const Route = createRootRoute({
       { name: "theme-color", content: "#09090b" },
     ],
     links: [
+      { rel: "preconnect", href: "https://cdn.jsdelivr.net", crossOrigin: "anonymous" },
+      {
+        rel: "stylesheet",
+        href: "https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-sans/style.min.css",
+      },
+      {
+        rel: "stylesheet",
+        href: "https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-mono/style.min.css",
+      },
       { rel: "stylesheet", href: appCss },
       { rel: "icon", href: "/favicon.ico" },
     ],
@@ -44,7 +53,7 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
       </head>
       <body className="min-h-screen bg-zinc-950 text-zinc-100">
         <Header />
-        <main>{children}</main>
+        <main className="animate-in">{children}</main>
         <Scripts />
       </body>
     </html>
@@ -53,28 +62,23 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
 
 function Header() {
   return (
-    <header className="border-b border-zinc-800/50">
-      <nav className="mx-auto flex max-w-5xl items-center justify-between px-4 py-4">
-        <Link to="/" className="font-mono text-lg font-semibold text-zinc-100">
+    <header className="border-b border-border">
+      <nav className="mx-auto flex max-w-6xl items-center justify-between px-5 py-3">
+        <Link
+          to="/"
+          className="group flex items-center gap-2 font-mono text-sm font-medium text-zinc-400 transition-colors hover:text-zinc-100"
+        >
+          <span className="inline-block h-2 w-2 rounded-full bg-accent opacity-80 transition-opacity group-hover:opacity-100" />
           shrd.sh
         </Link>
-        <div className="flex items-center gap-6">
-          <Link
-            to="/dashboard"
-            className="text-sm text-zinc-400 transition-colors hover:text-zinc-100"
-            activeProps={{ className: "text-zinc-100" }}
-          >
-            Dashboard
-          </Link>
-          <a
-            href="https://github.com/shrdsh/cli"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sm text-zinc-400 transition-colors hover:text-zinc-100"
-          >
-            GitHub
-          </a>
-        </div>
+        <a
+          href="https://github.com/Stoffberg/shrd.sh"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-mono text-xs text-zinc-600 transition-colors hover:text-zinc-400"
+        >
+          github
+        </a>
       </nav>
     </header>
   );
