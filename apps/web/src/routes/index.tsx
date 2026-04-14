@@ -50,7 +50,7 @@ function HomePage() {
             <code className="text-zinc-300">
               <span className="text-zinc-500"># Install the CLI</span>
               {"\n"}
-              <span className="text-emerald-400">$</span> brew install shrdsh/tap/shrd
+              <span className="text-emerald-400">$</span> brew tap Stoffberg/tap && brew install shrd
               {"\n\n"}
               <span className="text-zinc-500"># Share a file</span>
               {"\n"}
@@ -87,7 +87,7 @@ function HomePage() {
           />
           <FeatureCard
             title="Private"
-            description="End-to-end encryption optional. Content auto-expires."
+            description="End-to-end encryption optional. Retention is configurable, including never."
           />
           <FeatureCard
             title="Syntax Highlighting"

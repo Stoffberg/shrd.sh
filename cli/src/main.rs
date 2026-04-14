@@ -8,12 +8,12 @@ use reqwest::Body;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::time::Instant;
-use tokio_util::io::ReaderStream;
 
 const DEFAULT_BASE_URL: &str = "https://shrd.stoff.dev";
 const KEY_LEN: usize = 32;
+const GENERATED_ID_LEN: usize = 6;
 
 fn encrypt_content(plaintext: &[u8]) -> Result<(Vec<u8>, String)> {
     let rng = SystemRandom::new();
@@ -93,6 +93,43 @@ fn parse_id_and_key(input: &str) -> (String, Option<String>) {
     }
 }
 
+fn normalize_share_id(input: &str) -> String {
+    let trimmed = input
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let without_host = if let Some((_, path)) = trimmed.split_once('/') {
+        path
+    } else {
+        trimmed
+    };
+    let path = without_host
+        .trim_start_matches("shrd.sh/")
+        .trim_start_matches("shrd.stoff.dev/");
+    let id = path.split('/').next().unwrap_or(path).trim();
+    id.to_string()
+}
+
+fn is_valid_share_id(input: &str) -> bool {
+    let id = normalize_share_id(input);
+    let len = id.len();
+    len >= 4
+        && len <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn looks_like_share_reference(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.contains("://") || trimmed.contains('/') || trimmed.contains('#') {
+        return is_valid_share_id(trimmed);
+    }
+
+    let id = normalize_share_id(trimmed);
+    id.len() == GENERATED_ID_LEN && is_valid_share_id(&id)
+}
+
 #[derive(Parser)]
 #[command(name = "shrd")]
 #[command(about = "Share anything, instantly", long_about = None)]
@@ -104,42 +141,57 @@ struct Cli {
     #[arg(help = "Content ID to retrieve, or content to share")]
     input: Option<String>,
 
-    #[arg(short = 'x', long, help = "Expiry time (1h, 24h, 7d, 30d, never)")]
+    #[arg(
+        short = 'x',
+        long = "expire",
+        alias = "expires",
+        global = true,
+        help = "Expiry time (1h, 24h, 7d, 30d, never)"
+    )]
     expire: Option<String>,
 
-    #[arg(short, long, help = "Delete after first view")]
+    #[arg(short, long, global = true, help = "Delete after first view")]
     burn: bool,
 
-    #[arg(short, long, help = "End-to-end encrypt (key in URL fragment)")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "End-to-end encrypt (key in URL fragment)"
+    )]
     encrypt: bool,
 
-    #[arg(short, long, help = "Custom name/slug")]
+    #[arg(short, long, global = true, help = "Custom name/slug")]
     name: Option<String>,
 
-    #[arg(short, long, help = "Output as JSON")]
+    #[arg(short, long, global = true, help = "Output as JSON")]
     json: bool,
 
-    #[arg(short, long, help = "Suppress output except errors")]
+    #[arg(short, long, global = true, help = "Suppress output except errors")]
     quiet: bool,
 
-    #[arg(long, help = "Don't copy to clipboard")]
+    #[arg(long, global = true, help = "Don't copy to clipboard")]
     no_copy: bool,
 
-    #[arg(short, long, help = "Share clipboard contents")]
+    #[arg(short, long, global = true, help = "Share clipboard contents")]
     clipboard: bool,
 
-    #[arg(long, help = "Get metadata instead of content")]
+    #[arg(long, global = true, help = "Get metadata instead of content")]
     meta: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Log in to shrd.sh")]
-    Login,
-    #[command(about = "Log out of shrd.sh")]
-    Logout,
-    #[command(about = "Show current user")]
-    Whoami,
+    #[command(about = "Share text or a file")]
+    Upload {
+        #[arg(help = "Text to share or a file path")]
+        input: Option<String>,
+    },
+    #[command(about = "Retrieve an existing share")]
+    Get {
+        #[arg(help = "Share ID or URL")]
+        id: String,
+    },
     #[command(about = "Configure shrd settings")]
     Config {
         #[command(subcommand)]
@@ -230,6 +282,7 @@ struct PushResponse {
     delete_token: String,
     #[serde(rename = "expiresAt")]
     expires_at: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -244,6 +297,10 @@ struct ShareMeta {
     #[serde(rename = "expiresAt")]
     expires_at: Option<String>,
     filename: Option<String>,
+    name: Option<String>,
+    #[serde(rename = "storageType")]
+    storage_type: Option<String>,
+    encrypted: Option<bool>,
 }
 
 fn get_base_url() -> String {
@@ -251,11 +308,11 @@ fn get_base_url() -> String {
     if let Ok(url) = std::env::var("SHRD_BASE_URL") {
         return url;
     }
-    
+
     if let Some(url) = get_config_base_url() {
         return url;
     }
-    
+
     DEFAULT_BASE_URL.to_string()
 }
 
@@ -270,14 +327,14 @@ fn get_config_base_url() -> Option<String> {
 fn save_config_url(url: &str) -> Result<()> {
     let config_dir = get_config_dir()?;
     let config_file = config_dir.join("config.json");
-    
+
     let mut config: serde_json::Value = if config_file.exists() {
         let content = std::fs::read_to_string(&config_file)?;
         serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
-    
+
     config["base_url"] = serde_json::Value::String(url.to_string());
     std::fs::write(config_file, serde_json::to_string_pretty(&config)?)?;
     Ok(())
@@ -289,31 +346,6 @@ fn get_config_dir() -> Result<std::path::PathBuf> {
         .join("shrd");
     std::fs::create_dir_all(&config_dir)?;
     Ok(config_dir)
-}
-
-fn get_auth_token() -> Option<String> {
-    let config_dir = get_config_dir().ok()?;
-    let auth_file = config_dir.join("auth.json");
-    let content = std::fs::read_to_string(auth_file).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    json.get("token")?.as_str().map(String::from)
-}
-
-fn save_auth_token(token: &str) -> Result<()> {
-    let config_dir = get_config_dir()?;
-    let auth_file = config_dir.join("auth.json");
-    let content = serde_json::json!({ "token": token });
-    std::fs::write(auth_file, serde_json::to_string_pretty(&content)?)?;
-    Ok(())
-}
-
-fn clear_auth_token() -> Result<()> {
-    let config_dir = get_config_dir()?;
-    let auth_file = config_dir.join("auth.json");
-    if auth_file.exists() {
-        std::fs::remove_file(auth_file)?;
-    }
-    Ok(())
 }
 
 const DEFAULT_UPLOAD_SPEED: f64 = 500_000.0; // 500 KB/s conservative default
@@ -367,7 +399,10 @@ fn save_upload_speed(speed_bps: f64, body_size: usize) {
     let new_speed = old_speed * 0.7 + speed_bps * 0.3;
 
     config["upload_speed_bps"] = serde_json::Value::from(new_speed);
-    let _ = std::fs::write(&config_file, serde_json::to_string_pretty(&config).unwrap_or_default());
+    let _ = std::fs::write(
+        &config_file,
+        serde_json::to_string_pretty(&config).unwrap_or_default(),
+    );
 }
 
 #[cfg(feature = "clipboard")]
@@ -387,23 +422,14 @@ fn copy_to_clipboard(_text: &str) -> Result<()> {
 fn get_clipboard() -> Result<String> {
     use arboard::Clipboard;
     let mut clipboard = Clipboard::new()?;
-    clipboard.get_text().context("Failed to get clipboard contents")
+    clipboard
+        .get_text()
+        .context("Failed to get clipboard contents")
 }
 
 #[cfg(not(feature = "clipboard"))]
 fn get_clipboard() -> Result<String> {
     anyhow::bail!("Clipboard support not compiled in")
-}
-
-fn is_valid_id(s: &str) -> bool {
-    let s = s.trim_start_matches("https://").trim_start_matches("http://");
-    let s = s.trim_start_matches("shrd.sh/").trim_start_matches("shrd.stoff.dev/");
-    s.len() >= 4 && s.len() <= 32 && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-}
-
-fn extract_id(s: &str) -> &str {
-    let s = s.trim_start_matches("https://").trim_start_matches("http://");
-    s.trim_start_matches("shrd.sh/").trim_start_matches("shrd.stoff.dev/")
 }
 
 async fn push_content(
@@ -440,8 +466,6 @@ async fn push_content(
     let estimated_seconds = body_size as f64 / upload_speed;
     let show_progress = estimated_seconds > 10.0 && !cli.quiet && !cli.json;
 
-
-
     let progress_bar = if show_progress {
         let pb = ProgressBar::new(body_size as u64);
         pb.set_style(
@@ -473,13 +497,9 @@ async fn push_content(
         Body::from(body_bytes)
     };
 
-    let mut req = client
+    let req = client
         .post(format!("{}/api/v1/push", base_url))
         .header("Content-Type", "application/json");
-
-    if let Some(token) = get_auth_token() {
-        req = req.header("Authorization", format!("Bearer {}", token));
-    }
 
     let response = req.body(body).send().await?;
 
@@ -525,8 +545,8 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     let client = reqwest::Client::new();
     let base_url = get_base_url();
 
-    let file_content = std::fs::read(path)
-        .with_context(|| format!("Failed to read file: {}", path))?;
+    let file_content =
+        std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
 
     let (upload_content, encryption_key, content_size) = if cli.encrypt {
         let (encrypted, key) = encrypt_content(&file_content)?;
@@ -559,7 +579,10 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
     let body = if let Some(ref pb) = progress_bar {
         let pb_clone = pb.clone();
         let chunk_size = 8192;
-        let chunks: Vec<Vec<u8>> = upload_content.chunks(chunk_size).map(|c| c.to_vec()).collect();
+        let chunks: Vec<Vec<u8>> = upload_content
+            .chunks(chunk_size)
+            .map(|c| c.to_vec())
+            .collect();
         let stream = stream::iter(chunks).map(move |chunk| {
             pb_clone.inc(chunk.len() as u64);
             Ok::<_, std::io::Error>(chunk)
@@ -582,10 +605,10 @@ async fn upload_file_streaming(cli: &Cli, path: &str) -> Result<()> {
         req = req.header("X-Encrypted", "true");
     }
     if let Some(ref expire) = cli.expire {
-        req = req.header("X-Expires-In", expire);
+        req = req.header("X-Expire", expire);
     }
-    if let Some(token) = get_auth_token() {
-        req = req.header("Authorization", format!("Bearer {}", token));
+    if let Some(ref name) = cli.name {
+        req = req.header("X-Name", name);
     }
 
     let response = req.body(body).send().await?;
@@ -627,8 +650,8 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     let client = reqwest::Client::new();
     let base_url = get_base_url();
 
-    let file_content = std::fs::read(path)
-        .with_context(|| format!("Failed to read file: {}", path))?;
+    let file_content =
+        std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
 
     let (upload_content, encryption_key, content_size) = if cli.encrypt {
         let (encrypted, key) = encrypt_content(&file_content)?;
@@ -650,12 +673,18 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
         init_req = init_req.header("X-Encrypted", "true");
     }
     if let Some(ref expire) = cli.expire {
-        init_req = init_req.header("X-Expires-In", expire);
+        init_req = init_req.header("X-Expire", expire);
+    }
+    if let Some(ref name) = cli.name {
+        init_req = init_req.header("X-Name", name);
     }
 
     let init_response = init_req.send().await?;
     if !init_response.status().is_success() {
-        anyhow::bail!("Failed to init multipart upload: {}", init_response.status());
+        anyhow::bail!(
+            "Failed to init multipart upload: {}",
+            init_response.status()
+        );
     }
 
     let init: MultipartInitResponse = init_response.json().await?;
@@ -701,7 +730,10 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
         };
 
         let response = client
-            .put(format!("{}/api/v1/multipart/{}/part/{}", base_url, init.id, part_number))
+            .put(format!(
+                "{}/api/v1/multipart/{}/part/{}",
+                base_url, init.id, part_number
+            ))
             .header("X-Upload-Id", &init.upload_id)
             .header("Content-Length", part_size.to_string())
             .body(body)
@@ -711,7 +743,12 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to upload part {}: {} - {}", part_number, status, body);
+            anyhow::bail!(
+                "Failed to upload part {}: {} - {}",
+                part_number,
+                status,
+                body
+            );
         }
 
         uploaded += part_size as u64;
@@ -719,7 +756,10 @@ async fn upload_file_multipart(cli: &Cli, path: &str, file_size: u64) -> Result<
     }
 
     let complete_response = client
-        .post(format!("{}/api/v1/multipart/{}/complete", base_url, init.id))
+        .post(format!(
+            "{}/api/v1/multipart/{}/complete",
+            base_url, init.id
+        ))
         .header("X-Upload-Id", &init.upload_id)
         .header("X-Total-Size", content_size.to_string())
         .send()
@@ -754,14 +794,19 @@ fn print_result(cli: &Cli, result: &PushResponse, encryption_key: Option<&str>) 
     };
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "id": result.id,
-            "url": url,
-            "rawUrl": raw_url,
-            "deleteUrl": result.delete_url,
-            "expiresAt": result.expires_at,
-            "deleteToken": result.delete_token,
-        })).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": result.id,
+                "url": url,
+                "rawUrl": raw_url,
+                "deleteUrl": result.delete_url,
+                "expiresAt": result.expires_at,
+                "deleteToken": result.delete_token,
+                "name": result.name,
+            }))
+            .unwrap_or_default()
+        );
     } else if !cli.quiet {
         println!("{} {}", "→".green(), url.cyan());
         if !cli.no_copy {
@@ -789,7 +834,10 @@ fn get_unique_filename(filename: &str) -> String {
     }
 
     let path = std::path::Path::new(filename);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
     let ext = path.extension().and_then(|e| e.to_str());
 
     for i in 1..1000 {
@@ -801,10 +849,14 @@ fn get_unique_filename(filename: &str) -> String {
             return new_name;
         }
     }
-    format!("{}.{}", filename, std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs())
+    format!(
+        "{}.{}",
+        filename,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    )
 }
 
 async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
@@ -812,7 +864,8 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
 
     let client = reqwest::Client::new();
     let base_url = get_base_url();
-    let id = extract_id(id);
+    let (raw_id, decryption_key) = parse_id_and_key(id);
+    let id = normalize_share_id(&raw_id);
 
     if cli.meta {
         let response = client
@@ -847,6 +900,7 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
     let meta: ShareMeta = meta_response.json().await?;
     let is_binary = is_binary_content_type(&meta.content_type);
     let is_tty = atty::is(atty::Stream::Stdout);
+    let is_encrypted = meta.encrypted.unwrap_or(false);
 
     let response = client
         .get(format!("{}/{}/raw", base_url, id))
@@ -858,6 +912,43 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
             anyhow::bail!("Share not found or expired");
         }
         anyhow::bail!("Failed to fetch: {}", response.status());
+    }
+
+    if is_encrypted {
+        let key = decryption_key.context("Missing decryption key in share URL")?;
+        let decrypted = if meta.storage_type.as_deref() == Some("kv") {
+            let encoded = response.text().await?;
+            let ciphertext = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .context("Failed to decode encrypted content")?;
+            decrypt_content(&ciphertext, &key)?
+        } else {
+            let ciphertext = response.bytes().await?;
+            decrypt_content(ciphertext.as_ref(), &key)?
+        };
+
+        if is_binary && is_tty {
+            let default_filename = format!("{}.bin", id);
+            let filename = meta
+                .filename
+                .as_deref()
+                .or(meta.name.as_deref())
+                .unwrap_or(&default_filename);
+            let save_path = get_unique_filename(filename);
+            let mut file = tokio::fs::File::create(&save_path).await?;
+            file.write_all(&decrypted).await?;
+            file.flush().await?;
+
+            if !cli.quiet {
+                println!("{} {}", "→".green(), save_path.cyan());
+            }
+            return Ok(());
+        }
+
+        let mut stdout = tokio::io::stdout();
+        stdout.write_all(&decrypted).await?;
+        stdout.flush().await?;
+        return Ok(());
     }
 
     let content_length = meta.size;
@@ -881,7 +972,11 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
 
     if is_binary && is_tty {
         let default_filename = format!("{}.bin", id);
-        let filename = meta.filename.as_deref().unwrap_or(&default_filename);
+        let filename = meta
+            .filename
+            .as_deref()
+            .or(meta.name.as_deref())
+            .unwrap_or(&default_filename);
         let save_path = get_unique_filename(filename);
 
         let mut file = tokio::fs::File::create(&save_path).await?;
@@ -924,43 +1019,57 @@ async fn pull_content(cli: &Cli, id: &str) -> Result<()> {
     Ok(())
 }
 
+async fn upload_from_source(cli: &Cli, input: Option<&str>) -> Result<()> {
+    if cli.clipboard {
+        let content = get_clipboard()?;
+        return push_content(cli, content, None, None).await;
+    }
+
+    if let Some(input) = input {
+        if std::path::Path::new(input).exists() {
+            return upload_file_streaming(cli, input).await;
+        }
+        return push_content(cli, input.to_string(), None, None).await;
+    }
+
+    if atty::isnt(atty::Stream::Stdin) {
+        let mut content = String::new();
+        io::stdin().read_to_string(&mut content)?;
+        if content.is_empty() {
+            anyhow::bail!("No content provided");
+        }
+        return push_content(cli, content, None, None).await;
+    }
+
+    println!("{}", "Usage: shrd [OPTIONS] [INPUT]".yellow());
+    println!();
+    println!("Examples:");
+    println!(
+        "  {} | shrd           # Share from pipe",
+        "cat file.txt".dimmed()
+    );
+    println!("  {} file.txt           # Share a file", "shrd".dimmed());
+    println!(
+        "  {} upload file.txt    # Explicit upload mode",
+        "shrd".dimmed()
+    );
+    println!("  {} get abc123         # Retrieve by ID", "shrd".dimmed());
+    println!("  {} -c                 # Share clipboard", "shrd".dimmed());
+    println!();
+    println!("Run {} for more options.", "shrd --help".cyan());
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::Login) => {
-            let base_url = get_base_url();
-            println!("Opening {} in your browser...", format!("{}/login", base_url).cyan());
-            println!("After logging in, paste the token here:");
-            print!("> ");
-            io::stdout().flush()?;
-
-            let mut token = String::new();
-            io::stdin().read_line(&mut token)?;
-            let token = token.trim();
-
-            if token.is_empty() {
-                anyhow::bail!("No token provided");
-            }
-
-            save_auth_token(token)?;
-            println!("{} Logged in successfully!", "✓".green());
-            return Ok(());
+        Some(Commands::Upload { input }) => {
+            return upload_from_source(&cli, input.as_deref()).await
         }
-        Some(Commands::Logout) => {
-            clear_auth_token()?;
-            println!("{} Logged out.", "✓".green());
-            return Ok(());
-        }
-        Some(Commands::Whoami) => {
-            if get_auth_token().is_some() {
-                println!("Authenticated");
-            } else {
-                println!("Not logged in");
-            }
-            return Ok(());
-        }
+        Some(Commands::Get { id }) => return pull_content(&cli, id).await,
         Some(Commands::Config { action }) => {
             match action {
                 ConfigAction::SetUrl { url } => {
@@ -973,11 +1082,6 @@ async fn main() -> Result<()> {
                     println!("Configuration:");
                     println!("  Base URL: {}", base_url.cyan());
                     println!("  Config dir: {}", config_dir.display());
-                    if get_auth_token().is_some() {
-                        println!("  Auth: {}", "logged in".green());
-                    } else {
-                        println!("  Auth: {}", "not logged in".yellow());
-                    }
                 }
                 ConfigAction::Reset => {
                     let config_dir = get_config_dir()?;
@@ -993,42 +1097,14 @@ async fn main() -> Result<()> {
         None => {}
     }
 
-    if cli.clipboard {
-        let content = get_clipboard()?;
-        return push_content(&cli, content, None, None).await;
-    }
-
     if let Some(ref input) = cli.input {
-        if is_valid_id(input) {
+        if cli.meta || looks_like_share_reference(input) {
             return pull_content(&cli, input).await;
-        } else if std::path::Path::new(input).exists() {
-            // Always use streaming for files - faster, no size limits
-            return upload_file_streaming(&cli, input).await;
-        } else {
-            return push_content(&cli, input.clone(), None, None).await;
         }
+        return upload_from_source(&cli, Some(input)).await;
     }
 
-    if atty::isnt(atty::Stream::Stdin) {
-        let mut content = String::new();
-        io::stdin().read_to_string(&mut content)?;
-        if content.is_empty() {
-            anyhow::bail!("No content provided");
-        }
-        return push_content(&cli, content, None, None).await;
-    }
-
-    println!("{}", "Usage: shrd [OPTIONS] [INPUT]".yellow());
-    println!();
-    println!("Examples:");
-    println!("  {} | shrd           # Share from pipe", "cat file.txt".dimmed());
-    println!("  {} file.txt           # Share a file", "shrd".dimmed());
-    println!("  {} abc123              # Retrieve by ID", "shrd".dimmed());
-    println!("  {} -c                  # Share clipboard", "shrd".dimmed());
-    println!();
-    println!("Run {} for more options.", "shrd --help".cyan());
-
-    Ok(())
+    upload_from_source(&cli, None).await
 }
 
 #[cfg(test)]
@@ -1072,14 +1148,17 @@ mod tests {
         let original = b"Same content";
         let (ciphertext1, _key1) = encrypt_content(original).expect("encryption failed");
         let (ciphertext2, _key2) = encrypt_content(original).expect("encryption failed");
-        assert_ne!(ciphertext1, ciphertext2, "ciphertext should differ due to random nonce/key");
+        assert_ne!(
+            ciphertext1, ciphertext2,
+            "ciphertext should differ due to random nonce/key"
+        );
     }
 
     #[test]
     fn decrypt_fails_with_wrong_key() {
         let original = b"Secret data";
         let (ciphertext, _correct_key) = encrypt_content(original).expect("encryption failed");
-        
+
         let wrong_key = URL_SAFE_NO_PAD.encode([0u8; KEY_LEN]);
         let result = decrypt_content(&ciphertext, &wrong_key);
         assert!(result.is_err(), "decryption should fail with wrong key");
@@ -1089,36 +1168,48 @@ mod tests {
     fn decrypt_fails_with_corrupted_ciphertext() {
         let original = b"Secret data";
         let (mut ciphertext, key) = encrypt_content(original).expect("encryption failed");
-        
+
         if let Some(byte) = ciphertext.get_mut(NONCE_LEN + 5) {
             *byte ^= 0xFF;
         }
-        
+
         let result = decrypt_content(&ciphertext, &key);
-        assert!(result.is_err(), "decryption should fail with corrupted ciphertext");
+        assert!(
+            result.is_err(),
+            "decryption should fail with corrupted ciphertext"
+        );
     }
 
     #[test]
     fn decrypt_fails_with_truncated_ciphertext() {
         let result = decrypt_content(&[0u8; 5], "some_key");
-        assert!(result.is_err(), "decryption should fail with too-short ciphertext");
+        assert!(
+            result.is_err(),
+            "decryption should fail with too-short ciphertext"
+        );
     }
 
     #[test]
     fn decrypt_fails_with_invalid_key_length() {
         let original = b"Secret data";
         let (ciphertext, _key) = encrypt_content(original).expect("encryption failed");
-        
+
         let short_key = URL_SAFE_NO_PAD.encode([0u8; 16]);
         let result = decrypt_content(&ciphertext, &short_key);
-        assert!(result.is_err(), "decryption should fail with wrong key length");
+        assert!(
+            result.is_err(),
+            "decryption should fail with wrong key length"
+        );
     }
 
     #[test]
     fn ciphertext_contains_nonce_prefix() {
         let original = b"Test";
         let (ciphertext, _key) = encrypt_content(original).expect("encryption failed");
-        assert!(ciphertext.len() >= NONCE_LEN, "ciphertext should contain nonce prefix");
+        assert!(
+            ciphertext.len() >= NONCE_LEN,
+            "ciphertext should contain nonce prefix"
+        );
     }
 
     #[test]
@@ -1127,7 +1218,11 @@ mod tests {
         let (_ciphertext, key) = encrypt_content(original).expect("encryption failed");
         let decoded = URL_SAFE_NO_PAD.decode(&key);
         assert!(decoded.is_ok(), "key should be valid base64");
-        assert_eq!(decoded.unwrap().len(), KEY_LEN, "decoded key should be 32 bytes");
+        assert_eq!(
+            decoded.unwrap().len(),
+            KEY_LEN,
+            "decoded key should be 32 bytes"
+        );
     }
 
     #[test]
@@ -1149,5 +1244,46 @@ mod tests {
         let (id, key) = parse_id_and_key("abc123");
         assert_eq!(id, "abc123");
         assert_eq!(key, None);
+    }
+
+    #[test]
+    fn normalize_share_id_handles_full_urls() {
+        let id = normalize_share_id("https://shrd.stoff.dev/deploy_log/raw#key=secret");
+        assert_eq!(id, "deploy_log");
+    }
+
+    #[test]
+    fn looks_like_share_reference_only_auto_pulls_for_urls_and_generated_ids() {
+        assert!(looks_like_share_reference("abc123"));
+        assert!(looks_like_share_reference("https://shrd.sh/custom_name"));
+        assert!(!looks_like_share_reference("hello"));
+        assert!(!looks_like_share_reference("release_notes"));
+    }
+
+    #[test]
+    fn cli_supports_upload_subcommand_and_expires_alias() {
+        let cli = Cli::try_parse_from(["shrd", "upload", "--expires", "7d", "notes.txt"])
+            .expect("cli should parse");
+
+        assert_eq!(cli.expire.as_deref(), Some("7d"));
+        match cli.command {
+            Some(Commands::Upload { input }) => {
+                assert_eq!(input.as_deref(), Some("notes.txt"));
+            }
+            _ => panic!("expected upload command"),
+        }
+    }
+
+    #[test]
+    fn cli_supports_get_subcommand() {
+        let cli = Cli::try_parse_from(["shrd", "get", "release_notes#key=abc"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Some(Commands::Get { id }) => {
+                assert_eq!(id, "release_notes#key=abc");
+            }
+            _ => panic!("expected get command"),
+        }
     }
 }

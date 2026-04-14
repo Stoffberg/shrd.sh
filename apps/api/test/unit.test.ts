@@ -4,9 +4,53 @@ import type { Env } from "../src/types"
 
 type JsonResponse = Record<string, unknown>
 
+function encodeBody(value: string | Uint8Array): Uint8Array {
+  return typeof value === "string" ? new TextEncoder().encode(value) : value
+}
+
+function toReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes)
+      controller.close()
+    },
+  })
+}
+
+async function readBody(body: string | ReadableStream | Uint8Array): Promise<Uint8Array> {
+  if (typeof body === "string" || body instanceof Uint8Array) {
+    return encodeBody(body)
+  }
+
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) {
+      break
+    }
+    if (value) {
+      chunks.push(value)
+      total += value.length
+    }
+  }
+
+  const result = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    result.set(chunk, offset)
+    offset += chunk.length
+  }
+  return result
+}
+
 function createMockEnv(): Env {
   const kvStore = new Map<string, string>()
-  const r2Store = new Map<string, { body: string; customMetadata?: Record<string, string> }>()
+  const r2Store = new Map<string, { body: Uint8Array; customMetadata?: Record<string, string> }>()
+  const multipartUploads = new Map<string, { key: string; customMetadata?: Record<string, string> }>()
+  const multipartParts = new Map<string, Map<number, Uint8Array>>()
 
   return {
     BASE_URL: "https://test.shrd.sh",
@@ -29,17 +73,50 @@ function createMockEnv(): Env {
         const obj = r2Store.get(key)
         if (!obj) return null
         return {
-          text: async () => obj.body,
+          text: async () => new TextDecoder().decode(obj.body),
+          body: toReadableStream(obj.body),
           customMetadata: obj.customMetadata,
         }
       }),
-      put: vi.fn(async (key: string, body: string, options?: { customMetadata?: Record<string, string> }) => {
-        r2Store.set(key, { body, customMetadata: options?.customMetadata })
+      put: vi.fn(async (key: string, body: string | ReadableStream | Uint8Array, options?: { customMetadata?: Record<string, string> }) => {
+        r2Store.set(key, { body: await readBody(body), customMetadata: options?.customMetadata })
       }),
       delete: vi.fn(async (key: string) => {
         r2Store.delete(key)
       }),
       list: vi.fn(async () => ({ objects: [], truncated: false })),
+      createMultipartUpload: vi.fn(async (key: string, options?: { customMetadata?: Record<string, string> }) => {
+        const uploadId = `${key}-upload`
+        multipartUploads.set(uploadId, { key, customMetadata: options?.customMetadata })
+        multipartParts.set(uploadId, new Map())
+        return { uploadId }
+      }),
+      resumeMultipartUpload: vi.fn((key: string, uploadId: string) => ({
+        uploadPart: vi.fn(async (partNumber: number, body: string | ReadableStream | Uint8Array) => {
+          const session = multipartParts.get(uploadId)
+          if (!session) {
+            throw new Error("Upload session not found")
+          }
+          session.set(partNumber, await readBody(body))
+          return { etag: `${uploadId}-${partNumber}` }
+        }),
+        complete: vi.fn(async (parts: Array<{ partNumber: number }>) => {
+          const session = multipartParts.get(uploadId)
+          const upload = multipartUploads.get(uploadId)
+          if (!session || !upload) {
+            throw new Error("Upload session not found")
+          }
+          const ordered = parts.map((part) => session.get(part.partNumber) ?? new Uint8Array())
+          const total = ordered.reduce((sum, chunk) => sum + chunk.length, 0)
+          const merged = new Uint8Array(total)
+          let offset = 0
+          for (const chunk of ordered) {
+            merged.set(chunk, offset)
+            offset += chunk.length
+          }
+          r2Store.set(key, { body: merged, customMetadata: upload.customMetadata })
+        }),
+      })),
     } as unknown as R2Bucket,
     DB: {} as D1Database,
   }
@@ -130,6 +207,113 @@ describe("Push endpoint", () => {
     const diffSeconds = (expiresAt.getTime() - now.getTime()) / 1000
     expect(diffSeconds).toBeGreaterThan(3500)
     expect(diffSeconds).toBeLessThan(3700)
+  })
+
+  it("accepts string expiry values", async () => {
+    const res = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "string expiry",
+        expire: "7d",
+      }),
+    }, env)
+
+    expect(res.status).toBe(201)
+    const body = await res.json() as JsonResponse
+    const expiresAt = new Date(body.expiresAt as string)
+    const diffSeconds = (expiresAt.getTime() - Date.now()) / 1000
+    expect(diffSeconds).toBeGreaterThan(7 * 24 * 60 * 60 - 100)
+  })
+
+  it("supports never-expiring content", async () => {
+    const res = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "persistent",
+        expire: "never",
+      }),
+    }, env)
+
+    expect(res.status).toBe(201)
+    const body = await res.json() as JsonResponse
+    expect(body.expiresAt).toBeNull()
+    expect(env.CONTENT.put).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      {}
+    )
+  })
+
+  it("rejects invalid expiry values", async () => {
+    const res = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "bad expiry",
+        expire: "tomorrow",
+      }),
+    }, env)
+
+    expect(res.status).toBe(400)
+    const body = await res.json() as JsonResponse
+    expect(body.error).toBe("Invalid expiry value")
+  })
+
+  it("uses custom names as stable share ids", async () => {
+    const res = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "named share",
+        name: "release_notes",
+      }),
+    }, env)
+
+    expect(res.status).toBe(201)
+    const body = await res.json() as JsonResponse
+    expect(body.id).toBe("release_notes")
+    expect(body.name).toBe("release_notes")
+
+    const metaRes = await app.request("/release_notes/meta", {}, env)
+    const meta = await metaRes.json() as JsonResponse
+    expect(meta.name).toBe("release_notes")
+  })
+
+  it("rejects duplicate custom names", async () => {
+    await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "first",
+        name: "deploy-log",
+      }),
+    }, env)
+
+    const res = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "second",
+        name: "deploy-log",
+      }),
+    }, env)
+
+    expect(res.status).toBe(409)
+  })
+
+  it("rejects reserved names", async () => {
+    const res = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "reserved",
+        name: "health",
+      }),
+    }, env)
+
+    expect(res.status).toBe(400)
   })
 
   it("rejects empty content", async () => {
@@ -237,6 +421,148 @@ describe("Get content endpoints", () => {
   })
 })
 
+describe("Burn after read", () => {
+  it("deletes burn-after-read content after the first raw request", async () => {
+    const env = createMockEnv()
+
+    const createRes = await app.request("/api/v1/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "burn me",
+        burn: true,
+      }),
+    }, env)
+
+    const created = await createRes.json() as JsonResponse
+    const id = created.id as string
+
+    const firstRead = await app.request(`/${id}/raw`, {}, env)
+    expect(firstRead.status).toBe(200)
+    expect(await firstRead.text()).toBe("burn me")
+
+    const secondRead = await app.request(`/${id}/raw`, {}, env)
+    expect(secondRead.status).toBe(404)
+  })
+})
+
+describe("Upload endpoints", () => {
+  let env: Env
+
+  beforeEach(() => {
+    env = createMockEnv()
+  })
+
+  it("stores binary uploads with string expiry and custom name", async () => {
+    const res = await app.request("/api/v1/upload", {
+      method: "POST",
+      headers: {
+        "Content-Length": "4",
+        "X-Content-Type": "application/octet-stream",
+        "X-Filename": "blob.bin",
+        "X-Expire": "1h",
+        "X-Name": "binary_blob",
+      },
+      body: "test",
+    }, env)
+
+    expect(res.status).toBe(201)
+    const body = await res.json() as JsonResponse
+    expect(body.id).toBe("binary_blob")
+    expect(body.name).toBe("binary_blob")
+
+    const metaRes = await app.request("/binary_blob/meta", {}, env)
+    const meta = await metaRes.json() as JsonResponse
+    expect(meta.storageType).toBe("r2")
+    expect(meta.filename).toBe("blob.bin")
+
+    const rawRes = await app.request("/binary_blob/raw", {}, env)
+    expect(rawRes.status).toBe(200)
+    expect(await rawRes.text()).toBe("test")
+  })
+
+  it("supports never-expiring uploads", async () => {
+    const res = await app.request("/api/v1/upload", {
+      method: "POST",
+      headers: {
+        "Content-Length": "3",
+        "X-Expire": "never",
+      },
+      body: "raw",
+    }, env)
+
+    expect(res.status).toBe(201)
+    const body = await res.json() as JsonResponse
+    expect(body.expiresAt).toBeNull()
+  })
+
+  it("keeps backward compatibility for legacy string expiry headers", async () => {
+    const res = await app.request("/api/v1/upload", {
+      method: "POST",
+      headers: {
+        "Content-Length": "4",
+        "X-Expires-In": "7d",
+      },
+      body: "test",
+    }, env)
+
+    expect(res.status).toBe(201)
+    const body = await res.json() as JsonResponse
+    const expiresAt = new Date(body.expiresAt as string)
+    const diffSeconds = (expiresAt.getTime() - Date.now()) / 1000
+    expect(diffSeconds).toBeGreaterThan(7 * 24 * 60 * 60 - 100)
+  })
+})
+
+describe("Multipart uploads", () => {
+  let env: Env
+
+  beforeEach(() => {
+    env = createMockEnv()
+  })
+
+  it("completes multipart uploads with custom names", async () => {
+    const initRes = await app.request("/api/v1/multipart/init", {
+      method: "POST",
+      headers: {
+        "X-Content-Type": "application/octet-stream",
+        "X-Filename": "archive.tar",
+        "X-Expire": "7d",
+        "X-Name": "archive_bundle",
+      },
+    }, env)
+
+    expect(initRes.status).toBe(200)
+    const init = await initRes.json() as JsonResponse
+    const uploadId = init.uploadId as string
+
+    const partRes = await app.request("/api/v1/multipart/archive_bundle/part/1", {
+      method: "PUT",
+      headers: {
+        "X-Upload-Id": uploadId,
+      },
+      body: "hello",
+    }, env)
+
+    expect(partRes.status).toBe(200)
+
+    const completeRes = await app.request("/api/v1/multipart/archive_bundle/complete", {
+      method: "POST",
+      headers: {
+        "X-Upload-Id": uploadId,
+        "X-Total-Size": "5",
+      },
+    }, env)
+
+    expect(completeRes.status).toBe(201)
+    const completed = await completeRes.json() as JsonResponse
+    expect(completed.id).toBe("archive_bundle")
+
+    const rawRes = await app.request("/archive_bundle/raw", {}, env)
+    expect(await rawRes.text()).toBe("hello")
+  })
+})
+
 describe("Metadata endpoint", () => {
   let env: Env
   let testId: string
@@ -269,6 +595,8 @@ describe("Metadata endpoint", () => {
     expect(body.size).toBeGreaterThan(0)
     expect(body.createdAt).toBeDefined()
     expect(body.views).toBeDefined()
+    expect(body.storageType).toBe("kv")
+    expect(body.name).toBeNull()
   })
 
   it("returns 404 for non-existent content", async () => {

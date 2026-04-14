@@ -1,37 +1,48 @@
+export type ExpireDuration = `${number}h` | `${number}d` | "never";
+
 export interface PushOptions {
-  type?: "text" | "json" | "markdown";
-  expire?: "1h" | "24h" | "7d" | "30d" | "never";
+  contentType?: string;
+  filename?: string;
+  expire?: ExpireDuration;
+  expiresIn?: number;
   name?: string;
   burn?: boolean;
   encrypt?: boolean;
 }
 
-export interface PushResult {
+interface PushResponsePayload {
   id: string;
   url: string;
-  raw: string;
+  rawUrl: string;
   expiresAt: string | null;
   deleteToken: string;
+  name: string | null;
+}
+
+export interface PushResult extends PushResponsePayload {
+  raw: string;
 }
 
 export interface ShareMetadata {
   id: string;
-  type: string;
+  contentType: string;
   size: number;
   views: number;
   createdAt: string;
   expiresAt: string | null;
+  filename: string | null;
+  encrypted: boolean;
+  name: string | null;
+  storageType: "kv" | "r2";
 }
 
 export interface ShrdConfig {
   baseUrl?: string;
-  apiKey?: string;
 }
 
 const DEFAULT_BASE_URL = "https://shrd.stoff.dev";
 
 function getBaseUrl(config: ShrdConfig): string {
-  // Priority: 1. Explicit config, 2. Environment variable, 3. Default
   if (config.baseUrl) return config.baseUrl;
   if (typeof process !== "undefined" && process.env?.SHRD_BASE_URL) {
     return process.env.SHRD_BASE_URL;
@@ -40,31 +51,34 @@ function getBaseUrl(config: ShrdConfig): string {
 }
 
 function extractId(input: string, baseUrl: string): string {
-  let id = input;
-  // Remove common URL prefixes
-  id = id.replace(/^https?:\/\//, "");
-  // Remove the base URL host if present
+  const [withoutHash] = input.trim().split("#", 1);
+  let value = withoutHash.replace(/^https?:\/\//, "");
+
   try {
     const host = new URL(baseUrl).host;
-    id = id.replace(new RegExp(`^${host.replace(".", "\\.")}/`), "");
-  } catch {
-    // If baseUrl is invalid, try common patterns
-  }
-  // Remove common known hosts
-  id = id.replace(/^shrd\.sh\//, "");
-  id = id.replace(/^shrd\.stoff\.dev\//, "");
-  // Remove any remaining path components after the ID
-  id = id.split("/")[0];
-  return id;
+    if (value.startsWith(`${host}/`)) {
+      value = value.slice(host.length + 1);
+    }
+  } catch {}
+
+  value = value.replace(/^shrd\.sh\//, "");
+  value = value.replace(/^shrd\.stoff\.dev\//, "");
+
+  return value
+    .split("/")
+    .find(Boolean)
+    ?.trim() ?? value.trim();
+}
+
+function normalizePushResult(payload: PushResponsePayload): PushResult {
+  return {
+    ...payload,
+    raw: payload.rawUrl,
+  };
 }
 
 export function createClient(config: ShrdConfig = {}) {
   const baseUrl = getBaseUrl(config);
-  const headers: Record<string, string> = {};
-
-  if (config.apiKey) {
-    headers["Authorization"] = `Bearer ${config.apiKey}`;
-  }
 
   return {
     async push(content: string, options: PushOptions = {}): Promise<PushResult> {
@@ -72,7 +86,6 @@ export function createClient(config: ShrdConfig = {}) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...headers,
         },
         body: JSON.stringify({
           content,
@@ -85,15 +98,12 @@ export function createClient(config: ShrdConfig = {}) {
         throw new Error(`Push failed: ${response.status} - ${error}`);
       }
 
-      return response.json() as Promise<PushResult>;
+      return normalizePushResult(await response.json() as PushResponsePayload);
     },
 
     async pull(id: string): Promise<string> {
       const cleanId = extractId(id, baseUrl);
-
-      const response = await fetch(`${baseUrl}/${cleanId}/raw`, {
-        headers,
-      });
+      const response = await fetch(`${baseUrl}/${cleanId}/raw`);
 
       if (!response.ok) {
         if (response.status === 404) {
@@ -107,10 +117,7 @@ export function createClient(config: ShrdConfig = {}) {
 
     async meta(id: string): Promise<ShareMetadata> {
       const cleanId = extractId(id, baseUrl);
-
-      const response = await fetch(`${baseUrl}/${cleanId}/meta`, {
-        headers,
-      });
+      const response = await fetch(`${baseUrl}/${cleanId}/meta`);
 
       if (!response.ok) {
         if (response.status === 404) {
@@ -124,12 +131,10 @@ export function createClient(config: ShrdConfig = {}) {
 
     async delete(id: string, deleteToken: string): Promise<void> {
       const cleanId = extractId(id, baseUrl);
-
       const response = await fetch(`${baseUrl}/api/v1/${cleanId}`, {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${deleteToken}`,
-          ...headers,
         },
       });
 

@@ -1,57 +1,40 @@
-export type ContentType = "text" | "json" | "markdown" | "binary" | "image";
-
-export type ExpireDuration = "1h" | "24h" | "7d" | "30d" | "never";
+export type PresetExpireDuration = "1h" | "24h" | "7d" | "30d" | "never";
+export type ExpireDuration = PresetExpireDuration | `${number}h` | `${number}d`;
 
 export type UserTier = "free" | "pro" | "api" | "team";
 
 export interface ShareMetadata {
   id: string;
-  type: ContentType;
+  contentType: string;
   createdAt: string;
   expiresAt: string | null;
   burn: boolean;
   encrypted: boolean;
-  userId: string | null;
-  views: number;
   name: string | null;
+  filename: string | null;
+  views: number;
   size: number;
+  storageType: "kv" | "r2";
 }
 
 export interface CreateShareRequest {
   content: string;
-  type?: ContentType;
+  contentType?: string;
+  filename?: string;
   expire?: ExpireDuration;
+  expiresIn?: number;
   burn?: boolean;
-  encrypt?: boolean;
+  encrypted?: boolean;
   name?: string;
 }
 
 export interface CreateShareResponse {
   id: string;
   url: string;
-  raw: string;
+  rawUrl: string;
   expiresAt: string | null;
   deleteToken: string;
-}
-
-export interface CollectionItem {
-  name: string;
-  content: string;
-  type?: ContentType;
-}
-
-export interface CreateCollectionRequest {
-  items: CollectionItem[];
-  expire?: ExpireDuration;
-}
-
-export interface CreateCollectionResponse {
-  id: string;
-  url: string;
-  items: Array<{
-    name: string;
-    url: string;
-  }>;
+  name: string | null;
 }
 
 export interface ApiError {
@@ -62,7 +45,7 @@ export interface ApiError {
 
 export const TIER_LIMITS: Record<UserTier, {
   sharesPerDay: number;
-  maxExpiry: ExpireDuration;
+  maxExpiry: PresetExpireDuration;
   maxSize: number;
 }> = {
   free: { sharesPerDay: 50, maxExpiry: "24h", maxSize: 5 * 1024 * 1024 },
@@ -71,7 +54,7 @@ export const TIER_LIMITS: Record<UserTier, {
   team: { sharesPerDay: Infinity, maxExpiry: "never", maxSize: 500 * 1024 * 1024 },
 };
 
-export const EXPIRY_MS: Record<ExpireDuration, number | null> = {
+export const EXPIRY_MS: Record<PresetExpireDuration, number | null> = {
   "1h": 60 * 60 * 1000,
   "24h": 24 * 60 * 60 * 1000,
   "7d": 7 * 24 * 60 * 60 * 1000,

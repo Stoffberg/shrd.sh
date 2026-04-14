@@ -20,6 +20,12 @@ function getDecryptionScript(): string {
       return decrypted;
     }
 
+    function base64ToBytes(base64) {
+      const text = new TextDecoder().decode(base64);
+      const binary = atob(text);
+      return Uint8Array.from(binary, c => c.charCodeAt(0));
+    }
+
     function getKeyFromHash() {
       const hash = window.location.hash.slice(1);
       if (!hash) return null;
@@ -405,6 +411,7 @@ function renderEncryptedBinaryPage(
     const rawUrl = '${rawUrl}';
     const contentType = '${contentType}';
     const filename = '${filename}';
+    const storageType = '${metadata.storageType}';
     let decryptedBlob = null;
 
     async function init() {
@@ -417,7 +424,10 @@ function renderEncryptedBinaryPage(
       try {
         const response = await fetch(rawUrl);
         if (!response.ok) throw new Error('Failed to fetch content');
-        const ciphertext = new Uint8Array(await response.arrayBuffer());
+        let ciphertext = new Uint8Array(await response.arrayBuffer());
+        if (storageType === 'kv') {
+          ciphertext = base64ToBytes(ciphertext);
+        }
         const decrypted = await decryptContent(ciphertext, key);
         decryptedBlob = new Blob([decrypted], { type: contentType });
         
@@ -868,6 +878,7 @@ function renderEncryptedContentPage(
     ${getDecryptionScript()}
     
     const rawUrl = '${rawUrl}';
+    const storageType = '${metadata.storageType}';
     let decryptedText = null;
 
     async function init() {
@@ -880,7 +891,10 @@ function renderEncryptedContentPage(
       try {
         const response = await fetch(rawUrl);
         if (!response.ok) throw new Error('Failed to fetch content');
-        const ciphertext = new Uint8Array(await response.arrayBuffer());
+        let ciphertext = new Uint8Array(await response.arrayBuffer());
+        if (storageType === 'kv') {
+          ciphertext = base64ToBytes(ciphertext);
+        }
         const decrypted = await decryptContent(ciphertext, key);
         decryptedText = new TextDecoder().decode(decrypted);
         
