@@ -6,6 +6,7 @@ import {
   Scripts,
   Link,
 } from "@tanstack/react-router";
+import { GEIST_MONO_WOFF2_URL, GEIST_SANS_WOFF2_URL, getGeistFontFaceCss } from "../../../../packages/shared/src/fonts";
 import appCss from "~/app.css?url";
 
 export const Route = createRootRoute({
@@ -23,12 +24,18 @@ export const Route = createRootRoute({
     links: [
       { rel: "preconnect", href: "https://cdn.jsdelivr.net", crossOrigin: "anonymous" },
       {
-        rel: "stylesheet",
-        href: "https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-sans/style.min.css",
+        rel: "preload",
+        href: GEIST_SANS_WOFF2_URL,
+        as: "font",
+        type: "font/woff2",
+        crossOrigin: "anonymous",
       },
       {
-        rel: "stylesheet",
-        href: "https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-mono/style.min.css",
+        rel: "preload",
+        href: GEIST_MONO_WOFF2_URL,
+        as: "font",
+        type: "font/woff2",
+        crossOrigin: "anonymous",
       },
       { rel: "stylesheet", href: appCss },
       { rel: "icon", href: "/favicon.ico" },
@@ -50,6 +57,7 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
     <html lang="en" className="dark">
       <head>
         <HeadContent />
+        <style dangerouslySetInnerHTML={{ __html: getGeistFontFaceCss() }} />
       </head>
       <body className="min-h-screen bg-zinc-950 text-zinc-100">
         <Header />

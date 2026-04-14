@@ -409,7 +409,7 @@ describe("Get content endpoints", () => {
     const html = await res.text()
     expect(html).toContain("<!DOCTYPE html>")
     expect(html).toContain("Test content")
-    expect(html).toContain("Copy Link")
+    expect(html).toContain('id="copy-btn"')
   })
 
   it("includes product metadata on HTML share pages", async () => {
@@ -432,11 +432,10 @@ describe("Get content endpoints", () => {
 
     expect(htmlRes.status).toBe(200)
     const html = await htmlRes.text()
-    expect(html).toContain("named share")
+    expect(html).toContain("release_notes")
     expect(html).toContain("encrypted")
     expect(html).toContain("view once")
-    expect(html).toContain("permanent")
-    expect(html).toContain("never expires")
+    expect(html).toContain("This content will be deleted after you leave this page.")
   })
 
   it("exposes burn metadata for the CLI and web clients", async () => {

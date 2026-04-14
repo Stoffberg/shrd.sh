@@ -1,4 +1,5 @@
 import type { ContentMetadata } from "./types"
+import { GEIST_MONO_WOFF2_URL, GEIST_SANS_WOFF2_URL, getGeistFontFaceCss } from "../../../packages/shared/src/fonts"
 
 function escapeHtml(text: string): string {
   return text
@@ -84,8 +85,9 @@ function faviconLink(id: string): string {
 
 function fonts(): string {
   return `<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-sans/style.min.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-mono/style.min.css">`
+  <link rel="preload" href="${GEIST_SANS_WOFF2_URL}" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="${GEIST_MONO_WOFF2_URL}" as="font" type="font/woff2" crossorigin>
+  <style>${getGeistFontFaceCss()}</style>`
 }
 
 function baseStyles(): string {
