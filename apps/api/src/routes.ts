@@ -310,6 +310,34 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
       return jsonError(c, "Invalid expiry value", 400)
     }
 
+    if (!c.req.header("X-Idempotency-Key")) {
+      const resolvedId = await resolveShareId(c.env, body.name)
+      if (resolvedId.error) {
+        return jsonError(c, resolvedId.error, resolvedId.status)
+      }
+
+      const now = new Date()
+      const contentType = body.contentType ?? "text/plain"
+      const size = new TextEncoder().encode(body.content).length
+      const metadata = baseMetadata(
+        resolvedId.id,
+        now,
+        contentType,
+        size,
+        resolvedId.name,
+        body.filename,
+        getExpiresAt(now, ttlSeconds),
+        Boolean(body.burn),
+        Boolean(body.encrypted)
+      )
+      const ctx = getExecutionContext(c)
+      void runAsync(ctx, (async () => {
+        await storeContent(c.env, metadata.id, body.content, metadata)
+        await recordUploadMetrics(c.env, metadata, "inline")
+      })())
+      return c.json(createPushResponse(c.env.BASE_URL, metadata), 201)
+    }
+
     const idempotent = await withIdempotency(c, "push", body, async () => {
       const resolvedId = await resolveShareId(c.env, body.name)
       if (resolvedId.error) {
@@ -358,14 +386,57 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
     const name = c.req.header("X-Name")
     const encrypted = c.req.header("X-Encrypted") === "true"
 
-    const bytes = new Uint8Array(await c.req.arrayBuffer())
-    if (bytes.byteLength === 0) {
-      return jsonError(c, "Content-Length required", 400)
-    }
-
     const ttlSeconds = resolveTtlSeconds(expire, expiresIn)
     if (ttlSeconds === -1) {
       return jsonError(c, "Invalid expiry value", 400)
+    }
+
+    if (!c.req.header("X-Idempotency-Key")) {
+      const contentLength = c.req.header("Content-Length")
+      const size = contentLength ? Number.parseInt(contentLength, 10) : Number.NaN
+      if (!Number.isFinite(size) || size <= 0) {
+        return jsonError(c, "Content-Length required", 400)
+      }
+
+      const resolvedId = await resolveShareId(c.env, name)
+      if (resolvedId.error) {
+        return jsonError(c, resolvedId.error, resolvedId.status)
+      }
+
+      const bodyStream = c.req.raw.body
+      if (!bodyStream) {
+        return jsonError(c, "No body provided", 400)
+      }
+
+      const now = new Date()
+      const metadata = baseMetadata(
+        resolvedId.id,
+        now,
+        contentType,
+        size,
+        resolvedId.name,
+        filename,
+        getExpiresAt(now, ttlSeconds),
+        burn,
+        encrypted
+      )
+      metadata.storageType = "r2"
+
+      const ctx = getExecutionContext(c)
+      void runAsync(ctx, (async () => {
+        await c.env.STORAGE.put(resolvedId.id, bodyStream, {
+          customMetadata: { contentType, filename: filename ?? "" },
+        })
+        await storeBlobMetadata(c.env, metadata)
+        await recordUploadMetrics(c.env, metadata, "direct")
+      })())
+
+      return c.json(createPushResponse(c.env.BASE_URL, metadata), 201)
+    }
+
+    const bytes = new Uint8Array(await c.req.arrayBuffer())
+    if (bytes.byteLength === 0) {
+      return jsonError(c, "Content-Length required", 400)
     }
 
     const bodyHash = await sha256Hex(bytes)

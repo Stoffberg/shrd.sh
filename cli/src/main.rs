@@ -622,7 +622,6 @@ struct MultipartResumeManifest {
     resume_token: String,
     part_size: u64,
     uploaded_parts: Vec<MultipartUploadedPart>,
-    idempotency_key: String,
     filename: String,
     content_type: String,
     encryption_key: Option<String>,
@@ -1408,14 +1407,6 @@ fn get_clipboard() -> Result<String> {
     anyhow::bail!("Clipboard support not compiled in")
 }
 
-fn generate_idempotency_key() -> Result<String> {
-    let rng = SystemRandom::new();
-    let mut bytes = [0u8; 24];
-    rng.fill(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("Failed to generate idempotency key"))?;
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     digest(&SHA256, bytes)
         .as_ref()
@@ -1706,7 +1697,6 @@ async fn push_content(
     let encrypt = effective_encrypt(options);
     let burn = effective_burn(options);
     let expire = effective_expire(options);
-    let idempotency_key = generate_idempotency_key()?;
     let source_label = history_source_label(source.as_deref());
 
     let (final_content, encryption_key) = if encrypt {
@@ -1738,7 +1728,6 @@ async fn push_content(
             client
                 .post(format!("{}/api/v1/push", base_url))
                 .header("Content-Type", "application/json")
-                .header("X-Idempotency-Key", &idempotency_key)
                 .body(body_from_bytes(body_bytes.clone(), progress_bar.clone()))
         },
         5,
@@ -1799,11 +1788,23 @@ async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()
         .unwrap_or("file")
         .to_string();
     let content_type = guess_content_type(path);
-    let client = reqwest::Client::new();
-    let base_url = get_base_url();
-    let idempotency_key = generate_idempotency_key()?;
     let file_content =
         std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
+    if file_size <= INLINE_STORAGE_LIMIT as u64 {
+        if let Ok(text_content) = String::from_utf8(file_content.clone()) {
+            return push_content(
+                options,
+                text_content,
+                Some(content_type),
+                Some(filename),
+                Some("path".to_string()),
+            )
+            .await;
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let base_url = get_base_url();
     let encrypt = effective_encrypt(options);
     let burn = effective_burn(options);
     let expire = effective_expire(options);
@@ -1825,7 +1826,6 @@ async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()
                 .header("Content-Length", content_size.to_string())
                 .header("X-Content-Type", &content_type)
                 .header("X-Filename", &filename)
-                .header("X-Idempotency-Key", &idempotency_key)
                 .body(body_from_bytes(
                     upload_content.clone(),
                     progress_bar.clone(),
@@ -1902,7 +1902,6 @@ async fn finalize_multipart_upload(
                 ))
                 .header("X-Upload-Id", &manifest.upload_id)
                 .header("X-Total-Size", content_size.to_string())
-                .header("X-Idempotency-Key", &manifest.idempotency_key)
         },
         5,
     )
@@ -1953,7 +1952,6 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
     let encrypt = effective_encrypt(options);
     let burn = effective_burn(options);
     let expire = effective_expire(options);
-    let idempotency_key = generate_idempotency_key()?;
 
     let (upload_content, encryption_key, content_size) = if encrypt {
         let (encrypted, key) = encrypt_content(&file_content)?;
@@ -1967,8 +1965,7 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
         let mut request = client
             .post(format!("{}/api/v1/multipart/init", base_url))
             .header("X-Content-Type", &content_type)
-            .header("X-Filename", &filename)
-            .header("X-Idempotency-Key", &idempotency_key);
+            .header("X-Filename", &filename);
 
         if burn {
             request = request.header("X-Burn", "true");
@@ -2012,7 +2009,6 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
         resume_token: init.resume_token.clone(),
         part_size: init.part_size,
         uploaded_parts: Vec::new(),
-        idempotency_key,
         filename: filename.clone(),
         content_type: content_type.clone(),
         encryption_key: encryption_key.clone(),

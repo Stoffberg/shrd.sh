@@ -14,7 +14,7 @@ export function shouldUseLegacyFallback(error: unknown): boolean {
 export async function supportsD1Feature(
   env: Env,
   feature: string,
-  probeQuery: string
+  _probeQuery: string
 ): Promise<boolean> {
   if (!hasD1(env)) {
     return false
@@ -32,15 +32,6 @@ export async function supportsD1Feature(
     return known
   }
 
-  try {
-    await env.DB.prepare(probeQuery).first()
-    cached.set(feature, true)
-    return true
-  } catch (error) {
-    if (shouldUseLegacyFallback(error)) {
-      cached.set(feature, false)
-      return false
-    }
-    throw error
-  }
+  cached.set(feature, true)
+  return true
 }
