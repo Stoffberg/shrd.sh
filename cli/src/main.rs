@@ -2241,28 +2241,6 @@ fn resolve_result_urls(result: &PushResponse, encryption_key: Option<&str>) -> (
     }
 }
 
-fn summarize_share(result: &PushResponse, options: &UploadOptions) -> String {
-    let mut labels = Vec::new();
-    if let Some(mode) = effective_mode(options) {
-        labels.push(mode_label(mode).to_string());
-    }
-    if effective_encrypt(options) && effective_mode(options) != Some(ShareMode::Private) {
-        labels.push("encrypted".to_string());
-    }
-    if effective_burn(options) {
-        labels.push("burn".to_string());
-    }
-    if let Some(name) = &result.name {
-        labels.push(format!("named {}", name));
-    }
-    if let Some(expires_at) = &result.expires_at {
-        labels.push(format!("expires {}", expires_at));
-    } else {
-        labels.push("never expires".to_string());
-    }
-    labels.join(" · ")
-}
-
 struct HistoryRecordInput {
     source: Option<String>,
     content_type: Option<String>,
@@ -2300,6 +2278,19 @@ fn record_history(
     })
 }
 
+fn format_result_line(url: &str, copied: bool) -> String {
+    if copied {
+        format!(
+            "{} {} {}",
+            "→".green(),
+            url.cyan(),
+            "(copied to clipboard)".dimmed()
+        )
+    } else {
+        format!("{} {}", "→".green(), url.cyan())
+    }
+}
+
 fn print_result(options: &UploadOptions, result: &PushResponse, encryption_key: Option<&str>) {
     let (url, raw_url) = resolve_result_urls(result, encryption_key);
 
@@ -2318,13 +2309,8 @@ fn print_result(options: &UploadOptions, result: &PushResponse, encryption_key: 
             .unwrap_or_default()
         );
     } else if !options.quiet {
-        println!("{} {}", "→".green(), url.cyan());
-        eprintln!("{}", summarize_share(result, options).dimmed());
-        if !options.no_copy {
-            if copy_to_clipboard(&url).is_ok() {
-                eprintln!("{}", "(copied to clipboard)".dimmed());
-            }
-        }
+        let copied = !options.no_copy && copy_to_clipboard(&url).is_ok();
+        println!("{}", format_result_line(&url, copied));
     }
 }
 
@@ -2877,6 +2863,24 @@ mod tests {
         assert!(looks_like_share_reference("https://shrd.sh/custom_name"));
         assert!(!looks_like_share_reference("hello"));
         assert!(!looks_like_share_reference("release_notes"));
+    }
+
+    #[test]
+    fn format_result_line_keeps_success_output_to_one_line() {
+        let line = format_result_line("https://shrd.stoff.dev/w4rttq", false);
+
+        assert!(line.contains("https://shrd.stoff.dev/w4rttq"));
+        assert!(!line.contains("expires"));
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn format_result_line_appends_clipboard_status_inline() {
+        let line = format_result_line("https://shrd.stoff.dev/w4rttq", true);
+
+        assert!(line.contains("https://shrd.stoff.dev/w4rttq"));
+        assert!(line.contains("copied to clipboard"));
+        assert!(!line.contains('\n'));
     }
 
     #[test]
