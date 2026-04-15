@@ -22,7 +22,7 @@ import {
   notFoundResponse,
   runAsync,
 } from "./cache"
-import { renderBinaryPage, render404, renderContentPage, isBinaryContent } from "./html"
+import { getServedContentType, renderBinaryPage, render404, renderContentPage, isBinaryContent } from "./html"
 import {
   clearIdempotency,
   completeIdempotency,
@@ -735,7 +735,7 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
         runAsync(ctx, incrementViews(c.env, id))
       }
 
-      if (isBinaryContent(metadata.contentType)) {
+      if (isBinaryContent(metadata.contentType, metadata.filename)) {
         return c.html(renderBinaryPage(metadata, c.env.BASE_URL))
       }
 
@@ -835,6 +835,7 @@ async function handleContentRequest(
   await recordMetrics(env, { [metricKey]: 1 } as { readsRaw: number })
 
   const { metadata, body } = result
+  const servedContentType = getServedContentType(metadata.contentType, metadata.filename)
   if (metadata.maxViews !== undefined) {
     await incrementViews(env, id)
     if (metadata.views + 1 >= metadata.maxViews) {
@@ -842,7 +843,7 @@ async function handleContentRequest(
     }
     return new Response(body, {
       headers: {
-        "Content-Type": metadata.contentType,
+        "Content-Type": servedContentType,
         "Cache-Control": "no-store, no-cache, must-revalidate",
       },
     })
@@ -855,7 +856,7 @@ async function handleContentRequest(
 
   return new Response(body, {
     headers: {
-      "Content-Type": metadata.contentType,
+      "Content-Type": servedContentType,
       "Cache-Control": `public, max-age=${maxAge}, immutable`,
     },
   })

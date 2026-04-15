@@ -1,6 +1,206 @@
 import type { ContentMetadata } from "./types"
 import { GEIST_MONO_WOFF2_URL, GEIST_SANS_WOFF2_URL, getGeistFontFaceCss } from "../../../packages/shared/src/fonts"
 
+type PreviewKind = "text" | "image" | "video" | "audio" | "pdf" | "download"
+
+const textContentTypes = new Set([
+  "application/ecmascript",
+  "application/graphql",
+  "application/graphql-response+json",
+  "application/javascript",
+  "application/json",
+  "application/ld+json",
+  "application/manifest+json",
+  "application/ndjson",
+  "application/sql",
+  "application/toml",
+  "application/typescript",
+  "application/x-csh",
+  "application/x-httpd-php",
+  "application/x-java-source",
+  "application/x-lua",
+  "application/x-ndjson",
+  "application/x-perl",
+  "application/x-python",
+  "application/x-ruby",
+  "application/x-sh",
+  "application/x-shellscript",
+  "application/x-typescript",
+  "application/x-www-form-urlencoded",
+  "application/x-yaml",
+  "application/xml",
+  "application/yaml",
+])
+
+const archiveContentTypes = new Set([
+  "application/gzip",
+  "application/java-archive",
+  "application/vnd.android.package-archive",
+  "application/vnd.rar",
+  "application/x-7z-compressed",
+  "application/x-apple-diskimage",
+  "application/x-binary",
+  "application/x-bzip",
+  "application/x-bzip2",
+  "application/x-gzip",
+  "application/x-rar-compressed",
+  "application/x-tar",
+  "application/zip",
+  "binary/octet-stream",
+])
+
+const genericBinaryContentTypes = new Set([
+  "",
+  "application/binary",
+  "application/octet-stream",
+])
+
+const textContentTypeSuffixes = ["+json", "+xml", "+yaml", "+toml"]
+
+const textExtensions = new Set([
+  "c",
+  "cc",
+  "cfg",
+  "clj",
+  "conf",
+  "cpp",
+  "cs",
+  "css",
+  "csv",
+  "cxx",
+  "env",
+  "gitignore",
+  "go",
+  "graphql",
+  "h",
+  "hpp",
+  "htm",
+  "html",
+  "ini",
+  "java",
+  "js",
+  "json",
+  "json5",
+  "jsonc",
+  "jsx",
+  "kt",
+  "kts",
+  "less",
+  "log",
+  "lua",
+  "md",
+  "mdx",
+  "mjs",
+  "mts",
+  "php",
+  "pl",
+  "properties",
+  "py",
+  "r",
+  "rb",
+  "rs",
+  "sass",
+  "scala",
+  "scss",
+  "sh",
+  "sql",
+  "svg",
+  "swift",
+  "toml",
+  "ts",
+  "tsv",
+  "tsx",
+  "txt",
+  "vue",
+  "xml",
+  "yaml",
+  "yml",
+  "zsh",
+])
+
+const textFilenames = new Set([
+  ".editorconfig",
+  ".env",
+  ".gitignore",
+  ".npmrc",
+  "brewfile",
+  "dockerfile",
+  "gemfile",
+  "justfile",
+  "makefile",
+  "procfile",
+  "rakefile",
+])
+
+const imageExtensions = new Set([
+  "avif",
+  "bmp",
+  "cur",
+  "gif",
+  "heic",
+  "heif",
+  "ico",
+  "jpeg",
+  "jpg",
+  "png",
+  "svg",
+  "tif",
+  "tiff",
+  "webp",
+])
+
+const videoExtensions = new Set([
+  "m4v",
+  "mov",
+  "mp4",
+  "ogv",
+  "webm",
+])
+
+const audioExtensions = new Set([
+  "aac",
+  "flac",
+  "m4a",
+  "mp3",
+  "oga",
+  "ogg",
+  "opus",
+  "wav",
+  "weba",
+])
+
+const extensionContentTypes = new Map([
+  ["aac", "audio/aac"],
+  ["avif", "image/avif"],
+  ["bmp", "image/bmp"],
+  ["cur", "image/x-icon"],
+  ["flac", "audio/flac"],
+  ["gif", "image/gif"],
+  ["heic", "image/heic"],
+  ["heif", "image/heif"],
+  ["ico", "image/x-icon"],
+  ["jpeg", "image/jpeg"],
+  ["jpg", "image/jpeg"],
+  ["m4a", "audio/mp4"],
+  ["m4v", "video/mp4"],
+  ["mov", "video/quicktime"],
+  ["mp3", "audio/mpeg"],
+  ["mp4", "video/mp4"],
+  ["oga", "audio/ogg"],
+  ["ogg", "audio/ogg"],
+  ["ogv", "video/ogg"],
+  ["opus", "audio/opus"],
+  ["pdf", "application/pdf"],
+  ["png", "image/png"],
+  ["svg", "image/svg+xml"],
+  ["tif", "image/tiff"],
+  ["tiff", "image/tiff"],
+  ["wav", "audio/wav"],
+  ["weba", "audio/webm"],
+  ["webm", "video/webm"],
+  ["webp", "image/webp"],
+])
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
@@ -42,17 +242,193 @@ function getDecryptionScript(): string {
   `;
 }
 
-export function isBinaryContent(contentType: string): boolean {
-  return (
-    contentType.startsWith("image/") ||
-    contentType.startsWith("video/") ||
-    contentType.startsWith("audio/") ||
-    contentType.startsWith("application/pdf") ||
-    contentType.startsWith("application/zip") ||
-    contentType.startsWith("application/octet-stream") ||
-    contentType.startsWith("application/gzip") ||
-    contentType.startsWith("application/x-tar")
+function normalizeContentType(contentType: string): string {
+  return contentType.split(";")[0]?.trim().toLowerCase() ?? ""
+}
+
+function normalizeFilename(filename?: string): string | null {
+  if (!filename) {
+    return null
+  }
+
+  const normalized = filename.split(/[\\/]/).pop()?.trim().toLowerCase() ?? ""
+  return normalized || null
+}
+
+function getFilenameExtension(filename?: string): string | null {
+  const normalized = normalizeFilename(filename)
+  if (!normalized) {
+    return null
+  }
+
+  const dotIndex = normalized.lastIndexOf(".")
+  if (dotIndex <= 0 || dotIndex === normalized.length - 1) {
+    return null
+  }
+
+  return normalized.slice(dotIndex + 1)
+}
+
+function isTextLikeContentType(contentType: string): boolean {
+  if (contentType.startsWith("text/")) {
+    return true
+  }
+
+  if (textContentTypes.has(contentType)) {
+    return true
+  }
+
+  return textContentTypeSuffixes.some((suffix) => contentType.endsWith(suffix))
+}
+
+function getFilenamePreviewKind(filename?: string): PreviewKind | null {
+  const normalized = normalizeFilename(filename)
+  if (!normalized) {
+    return null
+  }
+
+  if (textFilenames.has(normalized)) {
+    return "text"
+  }
+
+  const extension = getFilenameExtension(normalized)
+  if (!extension) {
+    return null
+  }
+
+  if (imageExtensions.has(extension)) {
+    return "image"
+  }
+
+  if (videoExtensions.has(extension)) {
+    return "video"
+  }
+
+  if (audioExtensions.has(extension)) {
+    return "audio"
+  }
+
+  if (extension === "pdf") {
+    return "pdf"
+  }
+
+  if (textExtensions.has(extension)) {
+    return "text"
+  }
+
+  return null
+}
+
+function inferContentTypeFromFilename(filename?: string): string | null {
+  const extension = getFilenameExtension(filename)
+  if (!extension) {
+    return null
+  }
+
+  return extensionContentTypes.get(extension) ?? null
+}
+
+function getPreviewKind(contentType: string, filename?: string): PreviewKind {
+  const normalizedContentType = normalizeContentType(contentType)
+
+  if (normalizedContentType.startsWith("image/")) {
+    return "image"
+  }
+
+  if (normalizedContentType.startsWith("video/")) {
+    return "video"
+  }
+
+  if (normalizedContentType.startsWith("audio/")) {
+    return "audio"
+  }
+
+  if (normalizedContentType === "application/pdf") {
+    return "pdf"
+  }
+
+  if (archiveContentTypes.has(normalizedContentType)) {
+    return "download"
+  }
+
+  if (isTextLikeContentType(normalizedContentType)) {
+    return "text"
+  }
+
+  const filenamePreviewKind = getFilenamePreviewKind(filename)
+  if (filenamePreviewKind) {
+    return filenamePreviewKind
+  }
+
+  if (genericBinaryContentTypes.has(normalizedContentType)) {
+    return "download"
+  }
+
+  return "download"
+}
+
+export function getServedContentType(contentType: string, filename?: string): string {
+  const normalizedContentType = normalizeContentType(contentType)
+  if (!genericBinaryContentTypes.has(normalizedContentType)) {
+    return contentType
+  }
+
+  return inferContentTypeFromFilename(filename) ?? contentType
+}
+
+function renderDownloadBox(action: string, details: string): string {
+  return `<div class="download-box">${action}<p class="file-info">${details}</p></div>`
+}
+
+function renderBinaryPreview(metadata: ContentMetadata, rawUrl: string): string {
+  const previewKind = getPreviewKind(metadata.contentType, metadata.filename)
+  const filename = escapeHtml(metadata.filename || metadata.id)
+  const servedContentType = getServedContentType(metadata.contentType, metadata.filename)
+
+  if (previewKind === "image") {
+    return `<img src="${rawUrl}" class="media" alt="${filename}">`
+  }
+
+  if (previewKind === "video") {
+    return `<video controls autoplay class="media"><source src="${rawUrl}" type="${servedContentType}">Your browser does not support video.</video>`
+  }
+
+  if (previewKind === "audio") {
+    return `<audio controls class="media"><source src="${rawUrl}" type="${servedContentType}">Your browser does not support audio.</audio>`
+  }
+
+  if (previewKind === "pdf") {
+    return `<iframe src="${rawUrl}" class="media pdf"></iframe>`
+  }
+
+  return renderDownloadBox(
+    `<a href="${rawUrl}" download="${filename}" class="download-btn">${iconDownload()} Download File</a>`,
+    `${filename} &middot; ${formatSize(metadata.size)}`
   )
+}
+
+function renderEncryptedBinaryPreview(previewKind: PreviewKind, size: number): string {
+  if (previewKind === "image") {
+    return `document.getElementById('content').innerHTML = '<img src="' + blobUrl + '" class="media" alt="' + escapedFilename + '">';`
+  }
+
+  if (previewKind === "video") {
+    return `document.getElementById('content').innerHTML = '<video controls autoplay class="media"><source src="' + blobUrl + '" type="' + contentType + '"></video>';`
+  }
+
+  if (previewKind === "audio") {
+    return `document.getElementById('content').innerHTML = '<audio controls class="media"><source src="' + blobUrl + '" type="' + contentType + '"></audio>';`
+  }
+
+  if (previewKind === "pdf") {
+    return `document.getElementById('content').innerHTML = '<iframe src="' + blobUrl + '" class="media pdf"></iframe>';`
+  }
+
+  return `document.getElementById('content').innerHTML = '<div class="download-box"><button onclick="downloadFile()" class="download-btn">${iconDownload()} Download File</button><p class="file-info">' + escapedFilename + ' &middot; ${formatSize(size)}</p></div>';`
+}
+
+export function isBinaryContent(contentType: string, filename?: string): boolean {
+  return getPreviewKind(contentType, filename) !== "text"
 }
 
 function hashStr(s: string): number {
@@ -476,25 +852,11 @@ export function renderBinaryPage(metadata: ContentMetadata, baseUrl: string): st
   const viewsLeft = isBurn ? metadata.maxViews! - metadata.views - 1 : null
   const isLastView = viewsLeft === 0
   const rawUrl = `${baseUrl}/${metadata.id}/raw`
-  const contentType = metadata.contentType
   const isEncrypted = metadata.encrypted === true
   const label = metadata.filename ?? metadata.name ?? metadata.id
 
   if (isEncrypted) {
     return renderEncryptedBinaryPage(metadata, baseUrl, rawUrl, isBurn, viewsLeft, isLastView)
-  }
-
-  let mediaElement = ""
-  if (contentType.startsWith("video/")) {
-    mediaElement = `<video controls autoplay class="media"><source src="${rawUrl}" type="${contentType}">Your browser does not support video.</video>`
-  } else if (contentType.startsWith("audio/")) {
-    mediaElement = `<audio controls class="media"><source src="${rawUrl}" type="${contentType}">Your browser does not support audio.</audio>`
-  } else if (contentType.startsWith("image/")) {
-    mediaElement = `<img src="${rawUrl}" class="media" alt="${escapeHtml(metadata.filename || 'image')}">`
-  } else if (contentType === "application/pdf") {
-    mediaElement = `<iframe src="${rawUrl}" class="media pdf"></iframe>`
-  } else {
-    mediaElement = `<div class="download-box"><a href="${rawUrl}" download="${escapeHtml(metadata.filename || metadata.id)}" class="download-btn">${iconDownload()} Download File</a><p class="file-info">${escapeHtml(metadata.filename || 'file')} &middot; ${formatSize(metadata.size)}</p></div>`
   }
 
   const copyLinkHtml = `${iconCopy()} Copy Link`
@@ -524,7 +886,7 @@ export function renderBinaryPage(metadata: ContentMetadata, baseUrl: string): st
     </div>
     ${renderMetaBar(metadata)}
     ${renderBurnWarning(isBurn, viewsLeft, isLastView)}
-    ${mediaElement}
+    ${renderBinaryPreview(metadata, rawUrl)}
   </div>
   <script>
     ${confirmBtnScript()}
@@ -544,9 +906,11 @@ function renderEncryptedBinaryPage(
   viewsLeft: number | null,
   isLastView: boolean
 ): string {
-  const contentType = metadata.contentType
+  const contentType = getServedContentType(metadata.contentType, metadata.filename)
   const filename = metadata.filename || metadata.id
+  const escapedFilename = escapeHtml(filename)
   const label = metadata.filename ?? metadata.name ?? metadata.id
+  const previewKind = getPreviewKind(metadata.contentType, metadata.filename)
 
   const copyLinkHtml = `${iconCopy()} Copy Link`
 
@@ -591,8 +955,9 @@ function renderEncryptedBinaryPage(
     ${copyUrlScript()}
 
     var rawUrl = '${rawUrl}';
-    var contentType = '${contentType}';
-    var filename = '${escapeHtml(filename)}';
+    var contentType = ${JSON.stringify(contentType)};
+    var filename = ${JSON.stringify(filename)};
+    var escapedFilename = ${JSON.stringify(escapedFilename)};
     var storageType = '${metadata.storageType}';
     var decryptedBlob = null;
 
@@ -618,16 +983,7 @@ function renderEncryptedBinaryPage(
         document.getElementById('download-header-btn').disabled = false;
 
         var blobUrl = URL.createObjectURL(decryptedBlob);
-
-        if (contentType.startsWith('video/')) {
-          document.getElementById('content').innerHTML = '<video controls autoplay class="media"><source src="' + blobUrl + '" type="' + contentType + '"></video>';
-        } else if (contentType.startsWith('audio/')) {
-          document.getElementById('content').innerHTML = '<audio controls class="media"><source src="' + blobUrl + '" type="' + contentType + '"></audio>';
-        } else if (contentType.startsWith('image/')) {
-          document.getElementById('content').innerHTML = '<img src="' + blobUrl + '" class="media" alt="' + filename + '">';
-        } else {
-          document.getElementById('content').innerHTML = '<div class="download-box"><button onclick="downloadFile()" class="download-btn">${iconDownload()} Download File</button><p class="file-info">' + filename + '</p></div>';
-        }
+        ${renderEncryptedBinaryPreview(previewKind, metadata.size)}
       } catch (e) {
         showError('Failed to decrypt: ' + (e.message || 'Invalid key or corrupted data'));
       }
@@ -677,11 +1033,7 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   ${faviconLink(metadata.id)}
   ${fonts()}
-  <style>${baseStyles()}
-    #content { display: none; }
-    #loading { display: block; }
-    #error { display: none; }
-  </style>
+  <style>${baseStyles()}</style>
 </head>
 <body>
   <div class="wrap">
