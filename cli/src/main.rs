@@ -97,8 +97,8 @@ fn parse_id_and_key(input: &str) -> (String, Option<String>) {
     if let Some(hash_pos) = input.find('#') {
         let id = input[..hash_pos].to_string();
         let fragment = &input[hash_pos + 1..];
-        let key = if fragment.starts_with("key=") {
-            Some(fragment[4..].to_string())
+        let key = if let Some(stripped) = fragment.strip_prefix("key=") {
+            Some(stripped.to_string())
         } else {
             Some(fragment.to_string())
         };
@@ -128,8 +128,7 @@ fn normalize_share_id(input: &str) -> String {
 fn is_valid_share_id(input: &str) -> bool {
     let id = normalize_share_id(input);
     let len = id.len();
-    len >= 4
-        && len <= 64
+    (4..=64).contains(&len)
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -626,6 +625,12 @@ struct MultipartResumeManifest {
     content_type: String,
     encryption_key: Option<String>,
     created_at: u64,
+}
+
+struct MultipartFinalizeDetails {
+    content_type: String,
+    filename: String,
+    content_size: u64,
 }
 
 #[derive(Deserialize)]
@@ -1258,7 +1263,7 @@ fn print_ai_skill_status(json: bool, selection: AiSelection) -> Result<()> {
     }
 
     println!("shrd AI skill status for {}", selection.label().cyan());
-    println!("{:<14} {:<18} {}", "tool", "status", "path");
+    println!("{:<14} {:<18} path", "tool", "status");
     for status in statuses {
         println!("{:<14} {:<18} {}", status.tool, status.status, status.path);
     }
@@ -1413,6 +1418,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{:02x}", byte))
         .collect::<String>()
+}
+
+fn upload_idempotency_key() -> Result<String> {
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 16];
+    rng.fill(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("Failed to generate idempotency key"))?;
+    Ok(format!("shrd-upload-{}", URL_SAFE_NO_PAD.encode(bytes)))
 }
 
 fn should_retry_status(status: StatusCode, response: &reqwest::Response) -> bool {
@@ -1819,6 +1832,7 @@ async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()
 
     let progress_bar = upload_progress_bar(content_size, options);
     let start_time = Instant::now();
+    let idempotency_key = upload_idempotency_key()?;
     let response = send_with_retry(
         || {
             let mut request = client
@@ -1826,6 +1840,7 @@ async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()
                 .header("Content-Length", content_size.to_string())
                 .header("X-Content-Type", &content_type)
                 .header("X-Filename", &filename)
+                .header("X-Idempotency-Key", &idempotency_key)
                 .body(body_from_bytes(
                     upload_content.clone(),
                     progress_bar.clone(),
@@ -1888,9 +1903,7 @@ async fn finalize_multipart_upload(
     options: &UploadOptions,
     manifest_path: &Path,
     manifest: &MultipartResumeManifest,
-    content_type: String,
-    filename: String,
-    content_size: u64,
+    details: MultipartFinalizeDetails,
     encryption_key: Option<&str>,
 ) -> Result<()> {
     let complete_response = send_with_retry(
@@ -1901,7 +1914,7 @@ async fn finalize_multipart_upload(
                     base_url, manifest.share_id
                 ))
                 .header("X-Upload-Id", &manifest.upload_id)
-                .header("X-Total-Size", content_size.to_string())
+                .header("X-Total-Size", details.content_size.to_string())
         },
         5,
     )
@@ -1928,9 +1941,9 @@ async fn finalize_multipart_upload(
         encryption_key,
         HistoryRecordInput {
             source: Some("path".to_string()),
-            content_type: Some(content_type),
-            filename: Some(filename),
-            size: Some(content_size),
+            content_type: Some(details.content_type),
+            filename: Some(details.filename),
+            size: Some(details.content_size),
             storage_type: Some("r2".to_string()),
         },
     );
@@ -2095,9 +2108,11 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
         options,
         &manifest_path,
         &manifest,
-        content_type,
-        filename,
-        content_size,
+        MultipartFinalizeDetails {
+            content_type,
+            filename,
+            content_size,
+        },
         encryption_key.as_deref(),
     )
     .await
@@ -2219,9 +2234,11 @@ async fn resume_multipart_upload(options: &UploadOptions, manifest_path: &str) -
         options,
         Path::new(manifest_path),
         &manifest,
-        content_type,
-        filename,
-        manifest.file_size,
+        MultipartFinalizeDetails {
+            content_type,
+            filename,
+            content_size: manifest.file_size,
+        },
         manifest.encryption_key.as_deref(),
     )
     .await
@@ -2413,8 +2430,8 @@ fn print_recent_shares(options: &ListOptions) -> Result<()> {
     }
 
     println!(
-        "{:<3} {:<18} {:<12} {:<10} {:<12} {}",
-        "#", "share", "mode", "age", "source", "url"
+        "{:<3} {:<18} {:<12} {:<10} {:<12} url",
+        "#", "share", "mode", "age", "source"
     );
     for (index, entry) in shown_entries.into_iter().enumerate() {
         let label = entry.name.unwrap_or(entry.id);
