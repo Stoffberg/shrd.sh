@@ -65,7 +65,6 @@ export const dailyMetrics = sqliteTable("daily_metrics", {
   uploadsMultipart: integer("uploads_multipart").default(0).notNull(),
   readsRaw: integer("reads_raw").default(0).notNull(),
   readsMeta: integer("reads_meta").default(0).notNull(),
-  readsHtml: integer("reads_html").default(0).notNull(),
   deletes: integer("deletes").default(0).notNull(),
   notFound: integer("not_found").default(0).notNull(),
   errors4xx: integer("errors_4xx").default(0).notNull(),
@@ -74,21 +73,4 @@ export const dailyMetrics = sqliteTable("daily_metrics", {
   idempotencyConflicts: integer("idempotency_conflicts").default(0).notNull(),
   multipartResumes: integer("multipart_resumes").default(0).notNull(),
   bytesUploaded: integer("bytes_uploaded").default(0).notNull(),
-});
-
-export const dailyContentTypes = sqliteTable("daily_content_types", {
-  day: text("day").notNull(),
-  contentType: text("content_type").notNull(),
-  uploads: integer("uploads").default(0).notNull(),
-  bytes: integer("bytes").default(0).notNull(),
-});
-
-export const storageSnapshots = sqliteTable("storage_snapshots", {
-  timestamp: text("timestamp").primaryKey(),
-  inlineShareCount: integer("inline_share_count").default(0).notNull(),
-  inlineBytes: integer("inline_bytes").default(0).notNull(),
-  r2ObjectCount: integer("r2_object_count").default(0).notNull(),
-  r2Bytes: integer("r2_bytes").default(0).notNull(),
-  cleanupChecked: integer("cleanup_checked").default(0).notNull(),
-  cleanupDeleted: integer("cleanup_deleted").default(0).notNull(),
 });

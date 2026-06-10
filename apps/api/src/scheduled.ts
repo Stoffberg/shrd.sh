@@ -4,7 +4,6 @@ import {
   cleanupStaleMultipartSessions,
   shareExistsForStorageKey,
 } from "./storage"
-import { collectStorageSnapshot, recordStorageSnapshot } from "./stats"
 
 export async function cleanupOrphanedR2(env: Env): Promise<{ deleted: number; checked: number }> {
   let deleted = 0
@@ -35,9 +34,7 @@ export function handleScheduled(event: ScheduledEvent, env: Env, ctx: ExecutionC
       cleanupOrphanedR2(env),
       cleanupExpiredShares(env),
       cleanupStaleMultipartSessions(env),
-    ]).then(async ([r2Cleanup, expiredShares, staleMultipart]) => {
-      const snapshot = await collectStorageSnapshot(env, r2Cleanup)
-      await recordStorageSnapshot(env, snapshot)
+    ]).then(([r2Cleanup, expiredShares, staleMultipart]) => {
       console.log(
         `scheduled cleanup: r2 checked ${r2Cleanup.checked}, r2 deleted ${r2Cleanup.deleted}, expired shares ${expiredShares}, stale multipart ${staleMultipart}, cron ${event.cron}`
       )

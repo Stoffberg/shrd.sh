@@ -59,7 +59,6 @@ CREATE TABLE `daily_metrics` (
   `uploads_multipart` integer DEFAULT 0 NOT NULL,
   `reads_raw` integer DEFAULT 0 NOT NULL,
   `reads_meta` integer DEFAULT 0 NOT NULL,
-  `reads_html` integer DEFAULT 0 NOT NULL,
   `deletes` integer DEFAULT 0 NOT NULL,
   `not_found` integer DEFAULT 0 NOT NULL,
   `errors_4xx` integer DEFAULT 0 NOT NULL,
@@ -68,22 +67,4 @@ CREATE TABLE `daily_metrics` (
   `idempotency_conflicts` integer DEFAULT 0 NOT NULL,
   `multipart_resumes` integer DEFAULT 0 NOT NULL,
   `bytes_uploaded` integer DEFAULT 0 NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE `daily_content_types` (
-  `day` text NOT NULL,
-  `content_type` text NOT NULL,
-  `uploads` integer DEFAULT 0 NOT NULL,
-  `bytes` integer DEFAULT 0 NOT NULL,
-  PRIMARY KEY (`day`, `content_type`)
-);
---> statement-breakpoint
-CREATE TABLE `storage_snapshots` (
-  `timestamp` text PRIMARY KEY NOT NULL,
-  `inline_share_count` integer DEFAULT 0 NOT NULL,
-  `inline_bytes` integer DEFAULT 0 NOT NULL,
-  `r2_object_count` integer DEFAULT 0 NOT NULL,
-  `r2_bytes` integer DEFAULT 0 NOT NULL,
-  `cleanup_checked` integer DEFAULT 0 NOT NULL,
-  `cleanup_deleted` integer DEFAULT 0 NOT NULL
 );
