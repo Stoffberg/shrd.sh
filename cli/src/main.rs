@@ -1523,7 +1523,7 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
         });
         manifest
             .uploaded_parts
-            .sort_by(|left, right| left.part_number.cmp(&right.part_number));
+            .sort_by_key(|entry| entry.part_number);
         write_resume_manifest(&manifest_path, &manifest)?;
 
         uploaded += part_size as u64;
@@ -1652,7 +1652,7 @@ async fn resume_multipart_upload(options: &UploadOptions, manifest_path: &str) -
         });
         manifest
             .uploaded_parts
-            .sort_by(|left, right| left.part_number.cmp(&right.part_number));
+            .sort_by_key(|entry| entry.part_number);
         write_resume_manifest(Path::new(manifest_path), &manifest)?;
 
         uploaded += part_size as u64;
