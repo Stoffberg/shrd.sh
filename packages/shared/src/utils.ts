@@ -20,9 +20,7 @@ export function detectContentType(content: string): "json" | "markdown" | "text"
     try {
       JSON.parse(trimmed);
       return "json";
-    } catch {
-      // Not valid JSON
-    }
+    } catch {}
   }
   
   const markdownPatterns = [
