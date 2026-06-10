@@ -243,6 +243,12 @@ pnpm ci:full
 pnpm --filter @shrd/api test:integration
 ```
 
+Production smoke check:
+
+```bash
+SHRD_API_URL=https://shrd.stoff.dev node scripts/smoke-prod.mjs
+```
+
 Useful focused commands:
 
 ```bash

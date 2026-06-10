@@ -8,6 +8,8 @@
 - Share URLs now serve file bytes directly instead of HTML previews.
 - Root lint and CI now run real TypeScript and Rust checks.
 - Release metadata now uses one version across the workspace and CLI crate.
+- Deploy now uses a production smoke check instead of brittle live latency assertions.
+- Fresh installs use pnpm 10 with explicit dependency build-script policy.
 
 ### Added
 - Multipart upload support for large files.
@@ -17,3 +19,4 @@
 ### Removed
 - Web app workspace and browser renderer.
 - Better Auth, account tables, API keys, and collection scaffolding.
+- Temporary audit notes.

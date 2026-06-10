@@ -15,9 +15,10 @@ cargo build --manifest-path cli/Cargo.toml --release
 pnpm build
 pnpm ci:full
 pnpm --filter @shrd/api test:integration
+SHRD_API_URL=https://shrd.stoff.dev node scripts/smoke-prod.mjs
 ```
 
-`pnpm ci:full` runs TypeScript checks, Rust fmt/clippy, API unit/compat/e2e tests, CLI tests, and the Worker dry-run build.
+`pnpm ci:full` runs TypeScript checks, Rust fmt/clippy, API unit/compat/e2e tests, CLI tests, release metadata checks, and the Worker dry-run build. The smoke script is the deploy follow-up check for production health plus upload/download/delete behavior.
 
 ## Layout
 
