@@ -1,105 +1,32 @@
-# Contributing to shrd.sh
+# Contributing
 
-Thanks for your interest in contributing to shrd.sh! This document outlines how to get started.
+`shrd` is a CLI and API for reliable file upload and download. Browser preview, accounts, dashboards, and hosted web UI work are out of scope.
 
-## Development Setup
-
-### Prerequisites
-
-- Node.js 20+
-- pnpm 9+
-- Rust (for CLI development)
-- Cloudflare account (for deployment)
-
-### Getting Started
+## Setup
 
 ```bash
-git clone https://github.com/Stoffberg/shrd.sh
-cd shrd.sh
-pnpm install
+pnpm install --frozen-lockfile
+cargo build --manifest-path cli/Cargo.toml --release
 ```
 
-### Running Locally
+## Checks
 
 ```bash
-# Start the API (requires wrangler login)
-cd apps/api && pnpm dev
-
-# Start the web app
-cd apps/web && pnpm dev
-
-# Build the CLI
-cd cli && cargo build
+pnpm build
+pnpm ci:full
+pnpm --filter @shrd/api test:integration
 ```
 
-### Running Tests
+`pnpm ci:full` runs TypeScript checks, Rust fmt/clippy, API unit/compat/e2e tests, CLI tests, and the Worker dry-run build.
 
-```bash
-# Run all tests
-pnpm test
+## Layout
 
-# Run API tests only
-cd apps/api && pnpm test
-
-# Run CLI tests
-cd cli && cargo test
-
-# Run integration tests (requires deployed API)
-./tests/integration.sh
+```text
+apps/api/          Cloudflare Worker API
+cli/               Rust CLI
+packages/db/       D1 schema and migrations
+packages/sdk/      TypeScript SDK
+packages/shared/   Shared IDs and types
 ```
 
-## Project Structure
-
-```
-shrd.sh/
-├── apps/
-│   ├── api/          # Cloudflare Worker API (Hono)
-│   └── web/          # Web frontend (TanStack Start)
-├── packages/
-│   ├── shared/       # Shared types & utils
-│   ├── db/           # D1 schema (Drizzle)
-│   └── sdk/          # TypeScript SDK
-├── cli/              # Rust CLI
-└── tests/            # Integration tests
-```
-
-## Making Changes
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Run tests (`pnpm test`)
-5. Commit your changes (`git commit -m 'feat: add amazing feature'`)
-6. Push to your branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
-
-## Commit Messages
-
-We use conventional commits:
-
-- `feat:` New features
-- `fix:` Bug fixes
-- `docs:` Documentation changes
-- `refactor:` Code refactoring
-- `test:` Test additions or fixes
-- `chore:` Maintenance tasks
-
-## Code Style
-
-- TypeScript: Follow existing patterns, use strict types
-- Rust: Run `cargo fmt` before committing
-- No unused imports or variables
-- Prefer explicit over implicit
-
-## Areas for Contribution
-
-- Bug fixes
-- Performance improvements
-- Documentation improvements
-- New CLI features
-- SDK improvements
-- Test coverage
-
-## Questions?
-
-Open an issue or discussion on GitHub.
+Keep changes inside the frozen product contract: upload a file, share a URL, download it somewhere else.

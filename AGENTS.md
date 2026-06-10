@@ -8,4 +8,4 @@ Canonical contract notes for this repo:
 - API responses and metadata should use `expiresAt: string | null`. `null` means no automatic expiry.
 - Metadata responses should keep `contentType`, `filename`, `encrypted`, `name`, and `storageType` available because CLI download/decryption flows depend on them.
 - Share URLs serve file bytes directly. Do not add HTML preview/rendering support unless explicitly asked.
-- Ignore `apps/web` unless the user explicitly asks for web app work. Treat this repo as CLI + API first by default.
+- There is no web app workspace. Treat this repo as CLI + API first by default.

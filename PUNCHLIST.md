@@ -4,10 +4,9 @@ Ordered by impact on a cold senior-engineer review. An item is closed only after
 
 ## Open
 
-1. [ ] Public docs beyond README are stale. `PLAN.md`, `SELF_HOSTING.md`, `CONTRIBUTING.md`, and `CHANGELOG.md` still mention web, Better Auth, stats endpoints, old defaults, and obsolete integration scripts.
-2. [ ] API metrics code still carries removed browser/stats concepts (`readsHtml`, public stats aggregation helpers, storage snapshots). Either justify it as internal ops or delete it.
-3. [ ] CLI implementation is a 2,400+ line single file. It passes tests, but the file shape makes maintenance look amateur for a flagship repo.
-4. [ ] Release metadata is inconsistent. Root package is `0.1.0`, CLI crate is `0.1.12`, and changelog links mention `cli-v0.1.0`.
+1. [ ] API metrics code still carries removed browser/stats concepts (`readsHtml`, public stats aggregation helpers, storage snapshots). Either justify it as internal ops or delete it.
+2. [ ] CLI implementation is a 2,400+ line single file. It passes tests, but the file shape makes maintenance look amateur for a flagship repo.
+3. [ ] Release metadata is inconsistent. Root package is `0.1.0`, CLI crate is `0.1.12`, and package versions do not tell a clear release story.
 
 ## Closed
 
@@ -16,3 +15,4 @@ Ordered by impact on a cold senior-engineer review. An item is closed only after
 3. [x] Root `pnpm lint` is a fake green check. It exited 0 while Turbo ran zero lint tasks. Replaced it with `lint:ts` plus `lint:rust`, removed the unused Turbo lint task, and wired `ci:core` through `pnpm lint`. Verified with `pnpm lint` and `pnpm ci:full`.
 4. [x] The dead web app remained in the workspace. `pnpm build` scoped `@shrd/web` and replayed a giant TanStack/Shiki server bundle. Deleted `apps/web`, narrowed the workspace to `apps/api`, and regenerated the lockfile. Root `pnpm build` now scopes `@shrd/api`, `@shrd/db`, `@shrd/sdk`, and `@shrd/shared` only, dropping from 5 scoped packages and 3 build tasks to 4 scoped packages and 2 build tasks. Verified with `pnpm install --frozen-lockfile`, `pnpm build`, and `pnpm ci:full`.
 5. [x] Scaffolded auth and account schema remained despite the no-account product contract. Deleted the unused Better Auth module, removed `better-auth` and `@atinux/kysely-d1`, and trimmed account/session/user/api-key/collection tables plus `shares.user_id` from the Drizzle schema and migration snapshot. Verified no non-multipart auth/account tables remain with `rg`, then ran `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm ci:full`, and `pnpm --filter @shrd/api test:integration`.
+6. [x] Public docs beyond README were stale. Deleted obsolete `PLAN.md` and `SELF_HOSTING.md`, replaced `CONTRIBUTING.md` with the current setup/checks/layout, refreshed `CHANGELOG.md`, and updated `AGENTS.md` after the web workspace deletion. Verified stale web/auth/default-expiry/integration-script references with `rg`, then ran `pnpm build` and `pnpm ci:full`.
