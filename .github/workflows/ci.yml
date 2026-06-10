@@ -39,25 +39,47 @@ jobs:
 
   release-compat:
     name: Release Compatibility
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: cli
 
       - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - name: Check release targets
+      - name: Install Linux ARM tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
-          cargo check --manifest-path cli/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu
-          cargo check --manifest-path cli/Cargo.toml --locked --release --target x86_64-unknown-linux-musl
-          cargo check --manifest-path cli/Cargo.toml --locked --no-default-features
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Check release target
+        run: cargo check --manifest-path cli/Cargo.toml --locked --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc

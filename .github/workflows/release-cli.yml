@@ -29,9 +29,9 @@ jobs:
         id: version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${GITHUB_REF#refs/tags/cli-v}" >> $GITHUB_OUTPUT
+            echo "version=${GITHUB_REF#refs/tags/cli-v}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Validate version
@@ -114,21 +114,21 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          cp cli/target/${{ matrix.target }}/release/shrd dist/
+          cp "cli/target/${{ matrix.target }}/release/shrd" dist/
           cp LICENSE dist/
           cp README.md dist/
           cd dist
-          tar -czvf ../${{ matrix.name }}.tar.gz *
+          tar -czvf "../${{ matrix.name }}.tar.gz" ./*
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           mkdir dist
-          cp cli/target/${{ matrix.target }}/release/shrd.exe dist/
+          cp "cli/target/${{ matrix.target }}/release/shrd.exe" dist/
           cp LICENSE dist/
           cp README.md dist/
           cd dist
-          7z a -tzip ../${{ matrix.name }}.zip *
+          7z a -tzip "../${{ matrix.name }}.zip" ./*
 
       - name: Upload artifact (Unix)
         if: runner.os != 'Windows'
@@ -162,10 +162,10 @@ jobs:
         run: |
           mkdir release
           for dir in artifacts/*/; do
-            cp "$dir"* release/
+            cp "$dir"/* release/
           done
           cd release
-          sha256sum * > SHA256SUMS
+          sha256sum ./* > SHA256SUMS
           cat SHA256SUMS
 
       - name: Validate release files
@@ -208,10 +208,12 @@ jobs:
           DARWIN_ARM64=$(sha256sum artifacts/shrd-aarch64-apple-darwin/shrd-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
           LINUX_X64=$(sha256sum artifacts/shrd-x86_64-unknown-linux-gnu/shrd-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
           LINUX_ARM64=$(sha256sum artifacts/shrd-aarch64-unknown-linux-gnu/shrd-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
-          echo "darwin_x64=$DARWIN_X64" >> $GITHUB_OUTPUT
-          echo "darwin_arm64=$DARWIN_ARM64" >> $GITHUB_OUTPUT
-          echo "linux_x64=$LINUX_X64" >> $GITHUB_OUTPUT
-          echo "linux_arm64=$LINUX_ARM64" >> $GITHUB_OUTPUT
+          {
+            echo "darwin_x64=$DARWIN_X64"
+            echo "darwin_arm64=$DARWIN_ARM64"
+            echo "linux_x64=$LINUX_X64"
+            echo "linux_arm64=$LINUX_ARM64"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Update Homebrew tap
         uses: peter-evans/repository-dispatch@v4
