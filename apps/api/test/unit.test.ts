@@ -84,7 +84,9 @@ function createMockEnv(): Env {
         }
       }),
       put: vi.fn(async (key: string, body: string | ReadableStream | Uint8Array, options?: { customMetadata?: Record<string, string> }) => {
-        r2Store.set(key, { body: await readBody(body), customMetadata: options?.customMetadata })
+        const bytes = await readBody(body)
+        r2Store.set(key, { body: bytes, customMetadata: options?.customMetadata })
+        return { size: bytes.byteLength }
       }),
       delete: vi.fn(async (key: string) => {
         r2Store.delete(key)
@@ -302,6 +304,8 @@ describe("Push endpoint", () => {
     expect(body.deleteToken).toBeDefined()
     expect(body.deleteToken).toHaveLength(32)
     expect(body.expiresAt).toBeDefined()
+    const diffSeconds = (new Date(body.expiresAt as string).getTime() - Date.now()) / 1000
+    expect(diffSeconds).toBeGreaterThan(365 * 24 * 60 * 60 - 100)
   })
 
   it("falls back to KV when D1 schema is unavailable", async () => {
@@ -748,6 +752,22 @@ describe("Upload endpoints", () => {
     expect(res.status).toBe(201)
     const body = await res.json() as JsonResponse
     expect(body.expiresAt).toBeNull()
+  })
+
+  it("stores streaming uploads without content length", async () => {
+    const res = await app.request("/api/v1/upload", {
+      method: "POST",
+      headers: {
+        "X-Content-Type": "text/plain",
+        "X-Filename": "stream.txt",
+      },
+      body: "streamed body",
+    }, env)
+
+    expect(res.status).toBe(201)
+    const body = await res.json() as JsonResponse
+    const rawRes = await app.request(`/${body.id as string}/raw`, {}, env)
+    expect(await rawRes.text()).toBe("streamed body")
   })
 
   it("keeps backward compatibility for legacy string expiry headers", async () => {

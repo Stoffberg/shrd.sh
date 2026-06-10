@@ -41,7 +41,7 @@ const generateResumeToken = customAlphabet(
   40
 )
 
-const DEFAULT_TTL_SECONDS = 24 * 60 * 60
+const DEFAULT_TTL_SECONDS = 365 * 24 * 60 * 60
 const MULTIPART_PART_SIZE = 50 * 1024 * 1024
 const RESERVED_IDS = new Set(["api", "health"])
 const CUSTOM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{3,63}$/
@@ -330,11 +330,8 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
         Boolean(body.burn),
         Boolean(body.encrypted)
       )
-      const ctx = getExecutionContext(c)
-      void runAsync(ctx, (async () => {
-        await storeContent(c.env, metadata.id, body.content, metadata)
-        await recordUploadMetrics(c.env, metadata, "inline")
-      })())
+      await storeContent(c.env, metadata.id, body.content, metadata)
+      await recordUploadMetrics(c.env, metadata, "inline")
       return c.json(createPushResponse(c.env.BASE_URL, metadata), 201)
     }
 
@@ -393,8 +390,8 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
 
     if (!c.req.header("X-Idempotency-Key")) {
       const contentLength = c.req.header("Content-Length")
-      const size = contentLength ? Number.parseInt(contentLength, 10) : Number.NaN
-      if (!Number.isFinite(size) || size <= 0) {
+      const expectedSize = contentLength ? Number.parseInt(contentLength, 10) : null
+      if (expectedSize !== null && (!Number.isFinite(expectedSize) || expectedSize <= 0)) {
         return jsonError(c, "Content-Length required", 400)
       }
 
@@ -409,6 +406,16 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
       }
 
       const now = new Date()
+      const expiresAt = getExpiresAt(now, ttlSeconds)
+      const object = await c.env.STORAGE.put(resolvedId.id, bodyStream, {
+        customMetadata: { contentType, filename: filename ?? "" },
+      })
+      const size = expectedSize ?? object?.size ?? 0
+      if (size <= 0) {
+        await c.env.STORAGE.delete(resolvedId.id)
+        return jsonError(c, "No body provided", 400)
+      }
+
       const metadata = baseMetadata(
         resolvedId.id,
         now,
@@ -416,20 +423,14 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
         size,
         resolvedId.name,
         filename,
-        getExpiresAt(now, ttlSeconds),
+        expiresAt,
         burn,
         encrypted
       )
       metadata.storageType = "r2"
 
-      const ctx = getExecutionContext(c)
-      void runAsync(ctx, (async () => {
-        await c.env.STORAGE.put(resolvedId.id, bodyStream, {
-          customMetadata: { contentType, filename: filename ?? "" },
-        })
-        await storeBlobMetadata(c.env, metadata)
-        await recordUploadMetrics(c.env, metadata, "direct")
-      })())
+      await storeBlobMetadata(c.env, metadata)
+      await recordUploadMetrics(c.env, metadata, "direct")
 
       return c.json(createPushResponse(c.env.BASE_URL, metadata), 201)
     }
@@ -922,7 +923,7 @@ async function handleContentRequest(
 
   runAsync(ctx, incrementViews(env, id))
 
-  const expiresAt = metadata.expiresAt ? new Date(metadata.expiresAt) : new Date(Date.now() + 86400000)
+  const expiresAt = metadata.expiresAt ? new Date(metadata.expiresAt) : new Date(Date.now() + DEFAULT_TTL_SECONDS * 1000)
   const maxAge = Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000))
 
   return new Response(body, {

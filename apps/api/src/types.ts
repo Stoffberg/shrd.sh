@@ -41,7 +41,7 @@ export interface PushRequest {
   contentType?: string
   filename?: string
   expire?: string
-  expiresIn?: number
+  expiresIn?: number | string
   burn?: boolean
   name?: string
   encrypted?: boolean

@@ -612,46 +612,12 @@ function baseStyles(): string {
       line-height: 1.7;
       white-space: pre-wrap;
       word-break: break-word;
-      padding: 1.25rem;
-      color: #d4d4d8;
-    }
-    .content-box.markdown {
-      padding: 1.25rem;
-      line-height: 1.7;
-      color: #d4d4d8;
-    }
-    .content-box.markdown h1, .content-box.markdown h2, .content-box.markdown h3 {
-      margin-top: 1.5rem;
-      margin-bottom: 0.75rem;
-      color: #e4e4e7;
-    }
-    .content-box.markdown h1:first-child, .content-box.markdown h2:first-child {
-      margin-top: 0;
-    }
-    .content-box.markdown p { margin-bottom: 1rem; }
-    .content-box.markdown code {
-      font-family: 'Geist Mono', ui-monospace, monospace;
-      background: #16161a;
-      padding: 0.15rem 0.35rem;
-      border-radius: 4px;
-      font-size: 0.875em;
-    }
-    .content-box.markdown pre {
-      background: #09090b;
-      padding: 1rem;
-      border-radius: 6px;
       overflow-x: auto;
-      margin: 1rem 0;
+      padding: 1.25rem;
+      color: #d4d4d8;
     }
-    .content-box.markdown pre code {
-      background: none;
-      padding: 0;
-    }
-    .content-box.markdown ul, .content-box.markdown ol {
-      margin-left: 1.5rem;
-      margin-bottom: 1rem;
-    }
-    .content-box.markdown a { color: #22d3ee; }
+    .content-box pre a { color: #22d3ee; }
+    #content:empty { display: none; }
     .media {
       max-width: 100%;
       max-height: 80vh;
@@ -719,6 +685,7 @@ function baseStyles(): string {
       margin-right: 0.25rem;
     }
     .error-box {
+      display: none;
       background: rgba(239,68,68,0.06);
       border: 1px solid rgba(239,68,68,0.15);
       border-radius: 8px;
@@ -806,6 +773,10 @@ function renderBurnWarning(isBurn: boolean, viewsLeft: number | null, isLastView
 
 function renderKbdBar(keys: { key: string; label: string }[]): string {
   return `<div class="kbd-bar">${keys.map(k => `<span><kbd>${k.key}</kbd>${k.label}</span>`).join("")}</div>`
+}
+
+function linkifyEscapedText(text: string): string {
+  return text.replace(/(https?:\/\/[^\s<"]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
 }
 
 function confirmBtnScript(): string {
@@ -1022,6 +993,7 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
   const escaped = escapeHtml(content)
 
   const copyHtml = `${iconCopy()} Copy`
+  const rendered = linkifyEscapedText(escaped)
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1030,7 +1002,6 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#09090b">
   <title>${escapeHtml(label)} - shrd.sh</title>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   ${faviconLink(metadata.id)}
   ${fonts()}
   <style>${baseStyles()}</style>
@@ -1051,33 +1022,13 @@ export function renderContentPage(content: string, metadata: ContentMetadata, ba
     </div>
     ${renderMetaBar(metadata)}
     ${renderBurnWarning(isBurn, viewsLeft, isLastView)}
-    <div class="content-box" id="content"><pre>${escaped}</pre></div>
+    <div class="content-box" id="content"><pre>${rendered}</pre></div>
     ${renderKbdBar([{ key: "c", label: "copy" }, { key: "d", label: "download" }, { key: "r", label: "raw" }])}
   </div>
   <script>
     var raw = ${JSON.stringify(content)};
-    var contentEl = document.getElementById('content');
     ${confirmBtnScript()}
     ${copyUrlScript()}
-
-    if (looksLikeMarkdown(raw)) {
-      contentEl.classList.add('markdown');
-      contentEl.innerHTML = marked.parse(raw);
-    } else {
-      contentEl.innerHTML = '<pre>' + linkify(escapeHtml(raw)) + '</pre>';
-    }
-
-    function looksLikeMarkdown(text) {
-      return /^#{1,6}\\s|\\*\\*|__|\\[.+\\]\\(|^\\s*[-*+]\\s|^\\s*\\d+\\.\\s|^\`\`\`/m.test(text);
-    }
-
-    function escapeHtml(text) {
-      return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    function linkify(text) {
-      return text.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" target="_blank" rel="noopener" style="color:#22d3ee">$1</a>');
-    }
 
     function copyContent(e) {
       navigator.clipboard.writeText(raw);
@@ -1125,7 +1076,6 @@ function renderEncryptedContentPage(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#09090b">
   <title>${escapeHtml(label)} - shrd.sh</title>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   ${faviconLink(metadata.id)}
   ${fonts()}
   <style>${baseStyles()}</style>
@@ -1186,19 +1136,10 @@ function renderEncryptedContentPage(
         document.getElementById('copy-content-btn').disabled = false;
 
         var contentEl = document.getElementById('content');
-        if (looksLikeMarkdown(decryptedText)) {
-          contentEl.classList.add('markdown');
-          contentEl.innerHTML = marked.parse(decryptedText);
-        } else {
-          contentEl.innerHTML = '<pre>' + linkify(escapeHtml(decryptedText)) + '</pre>';
-        }
+        contentEl.innerHTML = '<pre>' + linkify(escapeHtml(decryptedText)) + '</pre>';
       } catch (e) {
         showError('Failed to decrypt: ' + (e.message || 'Invalid key or corrupted data'));
       }
-    }
-
-    function looksLikeMarkdown(text) {
-      return /^#{1,6}\\s|\\*\\*|__|\\[.+\\]\\(|^\\s*[-*+]\\s|^\\s*\\d+\\.\\s|^\\\`\\\`\\\`/m.test(text);
     }
 
     function escapeHtml(text) {
@@ -1206,7 +1147,7 @@ function renderEncryptedContentPage(
     }
 
     function linkify(text) {
-      return text.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" target="_blank" rel="noopener" style="color:#22d3ee">$1</a>');
+      return text.replace(/(https?:\\/\\/[^\\s<"]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
     }
 
     function copyContent(e) {

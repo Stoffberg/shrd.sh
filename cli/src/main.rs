@@ -10,7 +10,8 @@ use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use ring::digest::{digest, SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
-use std::io::{self, IsTerminal, Read, Write};
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -19,16 +20,14 @@ const KEY_LEN: usize = 32;
 const GENERATED_ID_LEN: usize = 6;
 const MAX_HISTORY_ITEMS: usize = 50;
 const INLINE_STORAGE_LIMIT: usize = 25 * 1024;
+const DEFAULT_EXPIRE: &str = "365d";
 const ROOT_AFTER_HELP: &str = "Examples:\n  shrd \"hello world\"\n  shrd notes.txt\n  cat deploy.log | shrd --mode temporary\n  shrd get last\n  shrd list\n";
 const UPLOAD_AFTER_HELP: &str = "Examples:\n  shrd upload notes.txt\n  shrd upload --mode private secrets.txt\n  cat deploy.log | shrd upload --expire 1h\n  shrd upload --name release-notes README.md\n";
 const GET_AFTER_HELP: &str = "Examples:\n  shrd get abc123\n  shrd get last\n  shrd get https://shrd.stoff.dev/release-notes#key=secret\n  shrd get abc123 --meta\n";
 const LIST_AFTER_HELP: &str =
     "Examples:\n  shrd list\n  shrd list --limit 20\n  shrd list --copy\n  shrd list --json\n";
-const CONFIG_AFTER_HELP: &str = "Examples:\n  shrd config show\n  shrd config set-url https://shrd.example.com\n  shrd config ai status\n  shrd config ai presets\n  shrd config ai install codex\n";
-const AI_INSTALL_AFTER_HELP: &str =
-    "Examples:\n  shrd config ai install\n  shrd config ai install codex\n  shrd config ai install --preset all --yes\n  shrd config ai install claude --force\n";
-const AI_REMOVE_AFTER_HELP: &str =
-    "Examples:\n  shrd config ai remove cursor\n  shrd config ai remove --preset all --yes\n";
+const CONFIG_AFTER_HELP: &str =
+    "Examples:\n  shrd config show\n  shrd config set-url https://shrd.example.com\n  shrd config reset\n";
 
 fn encrypt_content(plaintext: &[u8]) -> Result<(Vec<u8>, String)> {
     let rng = SystemRandom::new();
@@ -180,42 +179,13 @@ enum HistorySourceFilter {
     Path,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
-enum AiTool {
-    Cursor,
-    Codex,
-    #[value(alias = "claude")]
-    ClaudeCode,
-    Opencode,
-    All,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
-enum AiPreset {
-    All,
-}
-
-#[derive(Debug, Args, Clone, Default)]
-struct AiTargetOptions {
-    #[arg(value_enum, help = "Tool to configure", conflicts_with = "preset")]
-    tool: Option<AiTool>,
-
-    #[arg(
-        long,
-        value_enum,
-        help = "Preset to configure",
-        conflicts_with = "tool"
-    )]
-    preset: Option<AiPreset>,
-}
-
 #[derive(Debug, Args, Clone, Default)]
 struct UploadOptions {
     #[arg(
         short = 'x',
         long = "expire",
         alias = "expires",
-        help = "Expiry time (1h, 24h, 7d, 30d, never)"
+        help = "Expiry time (1h, 24h, 7d, 30d, 365d, never)"
     )]
     expire: Option<String>,
 
@@ -383,58 +353,10 @@ enum Commands {
 enum ConfigAction {
     #[command(about = "Set the API base URL (for self-hosted instances)")]
     SetUrl { url: String },
-    #[command(about = "Install or manage global AI skills")]
-    Ai {
-        #[command(subcommand)]
-        action: AiConfigAction,
-    },
     #[command(about = "Show current configuration")]
     Show,
     #[command(about = "Reset to default configuration")]
     Reset,
-}
-
-#[derive(Debug, Subcommand)]
-enum AiConfigAction {
-    #[command(
-        about = "Install the shrd skill into a supported AI tool",
-        after_help = AI_INSTALL_AFTER_HELP
-    )]
-    Install {
-        #[command(flatten)]
-        target: AiTargetOptions,
-        #[arg(long, help = "Replace customized skill directories")]
-        force: bool,
-        #[arg(
-            short = 'y',
-            long,
-            help = "Skip confirmation when defaulting to all tools"
-        )]
-        yes: bool,
-    },
-    #[command(
-        about = "Remove the shrd skill from a supported AI tool",
-        after_help = AI_REMOVE_AFTER_HELP
-    )]
-    Remove {
-        #[command(flatten)]
-        target: AiTargetOptions,
-        #[arg(long, help = "Remove customized skill directories")]
-        force: bool,
-        #[arg(
-            short = 'y',
-            long,
-            help = "Skip confirmation when defaulting to all tools"
-        )]
-        yes: bool,
-    },
-    #[command(about = "Show installed AI skill status")]
-    Status {
-        #[command(flatten)]
-        target: AiTargetOptions,
-    },
-    #[command(about = "List supported AI presets")]
-    Presets,
 }
 
 #[derive(Serialize)]
@@ -640,34 +562,6 @@ struct MultipartPartUploadResponse {
     etag: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AiSkillTarget {
-    tool: AiTool,
-    skill_dir: PathBuf,
-    skill_file: PathBuf,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AiSkillState {
-    Missing,
-    Installed,
-    Customized,
-}
-
-#[derive(Serialize)]
-struct AiSkillStatus {
-    tool: String,
-    status: String,
-    path: String,
-}
-
-#[derive(Serialize)]
-struct AiPresetStatus {
-    preset: String,
-    tools: Vec<String>,
-    default: bool,
-}
-
 #[derive(Serialize)]
 struct ConfigSummary {
     #[serde(rename = "baseUrl")]
@@ -676,12 +570,9 @@ struct ConfigSummary {
     config_dir: String,
     #[serde(rename = "recentShares")]
     recent_shares: usize,
-    #[serde(rename = "aiSkills")]
-    ai_skills: Vec<AiSkillStatus>,
 }
 
 fn get_base_url() -> String {
-    // Priority: 1. Environment variable, 2. Config file, 3. Default
     if let Ok(url) = std::env::var("SHRD_BASE_URL") {
         return url;
     }
@@ -801,7 +692,7 @@ fn effective_expire(options: &UploadOptions) -> Option<String> {
     match effective_mode(options) {
         Some(ShareMode::Temporary) => Some("1h".to_string()),
         Some(ShareMode::Permanent) => Some("never".to_string()),
-        _ => None,
+        _ => Some(DEFAULT_EXPIRE.to_string()),
     }
 }
 
@@ -845,472 +736,16 @@ fn get_config_dir() -> Result<std::path::PathBuf> {
     Ok(config_dir)
 }
 
-fn get_home_dir() -> Result<PathBuf> {
-    dirs::home_dir().context("Could not find home directory")
-}
-
-fn get_xdg_config_home() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(path));
-    }
-
-    Ok(get_home_dir()?.join(".config"))
-}
-
-fn canonical_shrd_skill() -> &'static str {
-    include_str!("../assets/shrd-skill.txt")
-}
-
-impl AiTool {
-    fn label(self) -> &'static str {
-        match self {
-            AiTool::Cursor => "cursor",
-            AiTool::Codex => "codex",
-            AiTool::ClaudeCode => "claude-code",
-            AiTool::Opencode => "opencode",
-            AiTool::All => "all",
-        }
-    }
-}
-
-impl AiPreset {
-    fn label(self) -> &'static str {
-        match self {
-            AiPreset::All => "all",
-        }
-    }
-
-    fn tools(self) -> Vec<AiTool> {
-        match self {
-            AiPreset::All => vec![
-                AiTool::Cursor,
-                AiTool::Codex,
-                AiTool::ClaudeCode,
-                AiTool::Opencode,
-            ],
-        }
-    }
-}
-
-impl AiSkillState {
-    fn label(self) -> &'static str {
-        match self {
-            AiSkillState::Missing => "missing",
-            AiSkillState::Installed => "installed",
-            AiSkillState::Customized => "customized",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AiSelection {
-    Tool(AiTool),
-    Preset(AiPreset),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AiActionResult {
-    Installed,
-    Replaced,
-    AlreadyInstalled,
-    Removed,
-    Missing,
-}
-
-impl AiSelection {
-    fn label(self) -> &'static str {
-        match self {
-            AiSelection::Tool(tool) => tool.label(),
-            AiSelection::Preset(preset) => preset.label(),
-        }
-    }
-
-    fn tools(self) -> Vec<AiTool> {
-        match self {
-            AiSelection::Tool(tool) => vec![tool],
-            AiSelection::Preset(preset) => preset.tools(),
-        }
-    }
-}
-
-fn resolve_ai_skill_targets_from_roots(
-    home_dir: &Path,
-    xdg_config_home: &Path,
-    selection: AiSelection,
-) -> Vec<AiSkillTarget> {
-    selection
-        .tools()
-        .into_iter()
-        .map(|tool| {
-            let skill_dir = match tool {
-                AiTool::Cursor => home_dir.join(".cursor").join("skills").join("shrd"),
-                AiTool::Codex => home_dir.join(".codex").join("skills").join("shrd"),
-                AiTool::ClaudeCode => home_dir.join(".claude").join("skills").join("shrd"),
-                AiTool::Opencode => xdg_config_home.join("opencode").join("skills").join("shrd"),
-                AiTool::All => unreachable!(),
-            };
-
-            AiSkillTarget {
-                tool,
-                skill_file: skill_dir.join("SKILL.md"),
-                skill_dir,
-            }
-        })
-        .collect()
-}
-
-fn resolve_ai_skill_targets(selection: AiSelection) -> Result<Vec<AiSkillTarget>> {
-    Ok(resolve_ai_skill_targets_from_roots(
-        &get_home_dir()?,
-        &get_xdg_config_home()?,
-        selection,
-    ))
-}
-
-fn ai_skill_dir_has_extra_files(target: &AiSkillTarget) -> Result<bool> {
-    if !target.skill_dir.exists() {
-        return Ok(false);
-    }
-
-    for entry in std::fs::read_dir(&target.skill_dir)? {
-        let entry = entry?;
-        if entry.file_name() != "SKILL.md" {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-fn ai_skill_state(target: &AiSkillTarget) -> Result<AiSkillState> {
-    if !target.skill_file.exists() {
-        if target.skill_dir.exists() && ai_skill_dir_has_extra_files(target)? {
-            return Ok(AiSkillState::Customized);
-        }
-        return Ok(AiSkillState::Missing);
-    }
-
-    let existing = std::fs::read_to_string(&target.skill_file)?;
-    if existing == canonical_shrd_skill() && !ai_skill_dir_has_extra_files(target)? {
-        return Ok(AiSkillState::Installed);
-    }
-
-    Ok(AiSkillState::Customized)
-}
-
-fn ai_skill_statuses(selection: AiSelection) -> Result<Vec<AiSkillStatus>> {
-    let targets = resolve_ai_skill_targets(selection)?;
-    targets
-        .into_iter()
-        .map(|target| {
-            let state = ai_skill_state(&target)?;
-            Ok(AiSkillStatus {
-                tool: target.tool.label().to_string(),
-                status: state.label().to_string(),
-                path: target.skill_file.display().to_string(),
-            })
-        })
-        .collect()
-}
-
-fn resolve_ai_selection(
-    target: &AiTargetOptions,
-    default_preset: Option<AiPreset>,
-) -> (AiSelection, bool) {
-    if let Some(tool) = target.tool {
-        if tool == AiTool::All {
-            return (AiSelection::Preset(AiPreset::All), true);
-        }
-        return (AiSelection::Tool(tool), true);
-    }
-
-    if let Some(preset) = target.preset {
-        return (AiSelection::Preset(preset), true);
-    }
-
-    (
-        AiSelection::Preset(default_preset.unwrap_or(AiPreset::All)),
-        false,
-    )
-}
-
-fn confirm_ai_default_selection(
-    action: &str,
-    selection: AiSelection,
-    json: bool,
-    yes: bool,
-    explicit: bool,
-) -> Result<()> {
-    if explicit || yes {
-        return Ok(());
-    }
-
-    if json {
-        anyhow::bail!(
-            "Refusing to default to preset '{}' in JSON mode. Re-run with --yes or choose a tool or --preset explicitly.",
-            selection.label()
-        );
-    }
-
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        anyhow::bail!(
-            "Refusing to default to preset '{}' without a terminal. Re-run with --yes or choose a tool or --preset explicitly.",
-            selection.label()
-        );
-    }
-
-    let targets = selection
-        .tools()
-        .into_iter()
-        .map(|tool| tool.label())
-        .collect::<Vec<_>>()
-        .join(", ");
-    print!(
-        "About to {} the shrd skill for preset '{}' ({}) [y/N]: ",
-        action,
-        selection.label(),
-        targets
-    );
-    io::stdout().flush()?;
-
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    let confirmed = matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes");
-    if !confirmed {
-        anyhow::bail!("Aborted.");
-    }
-
-    Ok(())
-}
-
-fn install_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<AiActionResult> {
-    let state = ai_skill_state(target)?;
-    if state == AiSkillState::Installed {
-        return Ok(AiActionResult::AlreadyInstalled);
-    }
-
-    if state == AiSkillState::Customized && !force {
-        anyhow::bail!(
-            "{} has a customized shrd skill at {}. Re-run with --force to replace it.",
-            target.tool.label(),
-            target.skill_file.display()
-        );
-    }
-
-    if target.skill_dir.exists() && force {
-        std::fs::remove_dir_all(&target.skill_dir)?;
-    }
-
-    std::fs::create_dir_all(&target.skill_dir)?;
-    std::fs::write(&target.skill_file, canonical_shrd_skill())?;
-    Ok(if state == AiSkillState::Customized {
-        AiActionResult::Replaced
-    } else {
-        AiActionResult::Installed
-    })
-}
-
-fn remove_ai_skill_target(target: &AiSkillTarget, force: bool) -> Result<AiActionResult> {
-    if !target.skill_dir.exists() {
-        return Ok(AiActionResult::Missing);
-    }
-
-    let state = ai_skill_state(target)?;
-    if state == AiSkillState::Customized && !force {
-        anyhow::bail!(
-            "{} has a customized shrd skill at {}. Re-run with --force to remove it.",
-            target.tool.label(),
-            target.skill_file.display()
-        );
-    }
-
-    std::fs::remove_dir_all(&target.skill_dir)?;
-    Ok(AiActionResult::Removed)
-}
-
-fn install_ai_skills(
-    json: bool,
-    selection: AiSelection,
-    force: bool,
-    explicit: bool,
-    yes: bool,
-) -> Result<()> {
-    confirm_ai_default_selection("install", selection, json, yes, explicit)?;
-    let targets = resolve_ai_skill_targets(selection)?;
-    for target in &targets {
-        let state = ai_skill_state(target)?;
-        if state == AiSkillState::Customized && !force {
-            anyhow::bail!(
-                "{} has a customized shrd skill at {}. Re-run with --force to replace it.",
-                target.tool.label(),
-                target.skill_file.display()
-            );
-        }
-    }
-
-    let statuses: Vec<AiSkillStatus> = targets
-        .iter()
-        .map(|target| {
-            let result = install_ai_skill_target(target, force)?;
-            let status = match result {
-                AiActionResult::Installed => "installed",
-                AiActionResult::Replaced => "replaced",
-                AiActionResult::AlreadyInstalled => "already-installed",
-                _ => unreachable!(),
-            };
-
-            Ok(AiSkillStatus {
-                tool: target.tool.label().to_string(),
-                status: status.to_string(),
-                path: target.skill_file.display().to_string(),
-            })
-        })
-        .collect::<Result<_>>()?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&statuses)?);
-    } else {
-        println!("Configured shrd skill for {}", selection.label().cyan());
-        for status in statuses {
-            let prefix = match status.status.as_str() {
-                "installed" => "✓".green(),
-                "replaced" => "↺".yellow(),
-                "already-installed" => "•".dimmed(),
-                _ => unreachable!(),
-            };
-            println!(
-                "{} {} for {} at {}",
-                prefix,
-                status.status.cyan(),
-                status.tool.cyan(),
-                status.path.dimmed()
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn remove_ai_skills(
-    json: bool,
-    selection: AiSelection,
-    force: bool,
-    explicit: bool,
-    yes: bool,
-) -> Result<()> {
-    confirm_ai_default_selection("remove", selection, json, yes, explicit)?;
-    let targets = resolve_ai_skill_targets(selection)?;
-    let mut removed = Vec::new();
-
-    for target in &targets {
-        let state = ai_skill_state(target)?;
-        if state == AiSkillState::Customized && !force {
-            anyhow::bail!(
-                "{} has a customized shrd skill at {}. Re-run with --force to remove it.",
-                target.tool.label(),
-                target.skill_file.display()
-            );
-        }
-    }
-
-    for target in &targets {
-        let result = remove_ai_skill_target(target, force)?;
-        let status = match result {
-            AiActionResult::Removed => "removed",
-            AiActionResult::Missing => "missing",
-            _ => unreachable!(),
-        };
-
-        removed.push(AiSkillStatus {
-            tool: target.tool.label().to_string(),
-            status: status.to_string(),
-            path: target.skill_file.display().to_string(),
-        });
-    }
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&removed)?);
-    } else {
-        println!(
-            "Configured shrd skill removal for {}",
-            selection.label().cyan()
-        );
-        for status in removed {
-            let prefix = if status.status == "removed" {
-                "✓".green()
-            } else {
-                "•".yellow()
-            };
-            println!(
-                "{} {} for {} at {}",
-                prefix,
-                status.status.cyan(),
-                status.tool.cyan(),
-                status.path.dimmed()
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn print_ai_skill_status(json: bool, selection: AiSelection) -> Result<()> {
-    let statuses = ai_skill_statuses(selection)?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&statuses)?);
-        return Ok(());
-    }
-
-    println!("shrd AI skill status for {}", selection.label().cyan());
-    println!("{:<14} {:<18} path", "tool", "status");
-    for status in statuses {
-        println!("{:<14} {:<18} {}", status.tool, status.status, status.path);
-    }
-
-    Ok(())
-}
-
-fn print_ai_presets(json: bool) -> Result<()> {
-    let presets = vec![AiPresetStatus {
-        preset: AiPreset::All.label().to_string(),
-        tools: AiPreset::All
-            .tools()
-            .into_iter()
-            .map(|tool| tool.label().to_string())
-            .collect(),
-        default: true,
-    }];
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&presets)?);
-    } else {
-        println!("{:<14} {:<7} tools", "preset", "default");
-        for preset in presets {
-            println!(
-                "{:<14} {:<7} {}",
-                preset.preset,
-                if preset.default { "yes" } else { "no" },
-                preset.tools.join(", ")
-            );
-        }
-    }
-
-    Ok(())
-}
-
 fn print_config_show(json: bool) -> Result<()> {
     let base_url = get_base_url();
     let config_dir = get_config_dir()?;
     let history_count = load_history().map(|entries| entries.len()).unwrap_or(0);
-    let ai_skills = ai_skill_statuses(AiSelection::Preset(AiPreset::All))?;
 
     if json {
         let summary = ConfigSummary {
             base_url,
             config_dir: config_dir.display().to_string(),
             recent_shares: history_count,
-            ai_skills,
         };
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
@@ -1320,15 +755,11 @@ fn print_config_show(json: bool) -> Result<()> {
     println!("  Base URL: {}", base_url.cyan());
     println!("  Config dir: {}", config_dir.display());
     println!("  Recent shares: {}", history_count);
-    println!("  AI skills:");
-    for status in ai_skills {
-        println!("    {}: {} ({})", status.tool, status.status, status.path);
-    }
 
     Ok(())
 }
 
-const DEFAULT_UPLOAD_SPEED: f64 = 500_000.0; // 500 KB/s conservative default
+const DEFAULT_UPLOAD_SPEED: f64 = 500_000.0;
 
 fn get_upload_speed() -> f64 {
     let config_dir = match get_config_dir() {
@@ -1350,8 +781,6 @@ fn get_upload_speed() -> f64 {
 }
 
 fn save_upload_speed(speed_bps: f64, body_size: usize) {
-    // Only update speed estimate for meaningful uploads (>50KB)
-    // Small uploads are dominated by latency, not bandwidth
     if body_size < 50_000 {
         return;
     }
@@ -1371,7 +800,6 @@ fn save_upload_speed(speed_bps: f64, body_size: usize) {
         serde_json::json!({})
     };
 
-    // Exponential moving average with new measurement weighted at 30%
     let old_speed = config
         .get("upload_speed_bps")
         .and_then(|v| v.as_f64())
@@ -1785,6 +1213,15 @@ async fn push_content(
 }
 
 const MULTIPART_THRESHOLD: u64 = 95 * 1024 * 1024;
+
+fn read_file_part(path: &str, offset: u64, size: usize) -> Result<Vec<u8>> {
+    let mut file = File::open(path).with_context(|| format!("Failed to read file: {}", path))?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = vec![0; size];
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
 async fn upload_file_streaming(options: &UploadOptions, path: &str) -> Result<()> {
     let path_obj = Path::new(path);
     let file_size = std::fs::metadata(path)
@@ -1960,18 +1397,18 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
     let content_type = guess_content_type(path);
     let client = reqwest::Client::new();
     let base_url = get_base_url();
-    let file_content =
-        std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
     let encrypt = effective_encrypt(options);
     let burn = effective_burn(options);
     let expire = effective_expire(options);
 
-    let (upload_content, encryption_key, content_size) = if encrypt {
+    let (encrypted_payload, encryption_key, content_size) = if encrypt {
+        let file_content =
+            std::fs::read(path).with_context(|| format!("Failed to read file: {}", path))?;
         let (encrypted, key) = encrypt_content(&file_content)?;
         let size = encrypted.len() as u64;
-        (encrypted, Some(key), size)
+        (Some(encrypted), Some(key), size)
     } else {
-        (file_content, None, file_size)
+        (None, None, file_size)
     };
 
     let mut init_request = || {
@@ -2006,7 +1443,7 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
 
     let init: MultipartInitResponse = init_response.json().await?;
     let manifest_path = manifest_path_for_upload(&init.id)?;
-    let payload_path = if encryption_key.is_some() {
+    let payload_path = if let Some(upload_content) = encrypted_payload {
         let payload_path = uploads_dir()?.join(format!("{}.payload", init.id));
         std::fs::write(&payload_path, &upload_content)?;
         payload_path.to_string_lossy().to_string()
@@ -2014,7 +1451,7 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
         path.to_string()
     };
     let mut manifest = MultipartResumeManifest {
-        file_path: payload_path,
+        file_path: payload_path.clone(),
         file_size: content_size,
         base_url: base_url.clone(),
         share_id: init.id.clone(),
@@ -2036,7 +1473,7 @@ async fn upload_file_multipart(options: &UploadOptions, path: &str, file_size: u
 
     while uploaded < content_size {
         let part_size = std::cmp::min(init.part_size, content_size - uploaded) as usize;
-        let part_data = upload_content[uploaded as usize..uploaded as usize + part_size].to_vec();
+        let part_data = read_file_part(&payload_path, uploaded, part_size)?;
         let part_sha256 = sha256_hex(&part_data);
 
         let response = send_with_retry(
@@ -2147,8 +1584,6 @@ async fn resume_multipart_upload(options: &UploadOptions, manifest_path: &str) -
     write_resume_manifest(Path::new(manifest_path), &manifest)?;
 
     let path = manifest.file_path.clone();
-    let file_content =
-        std::fs::read(&path).with_context(|| format!("Failed to read file: {}", path))?;
     let filename = manifest.filename.clone();
     let content_type = manifest.content_type.clone();
     let progress_bar = upload_progress_bar(manifest.file_size, options);
@@ -2165,7 +1600,7 @@ async fn resume_multipart_upload(options: &UploadOptions, manifest_path: &str) -
     let mut part_number = 1u64;
     while uploaded < manifest.file_size {
         let part_size = std::cmp::min(status.part_size, manifest.file_size - uploaded) as usize;
-        let part_data = file_content[uploaded as usize..uploaded as usize + part_size].to_vec();
+        let part_data = read_file_part(&path, uploaded, part_size)?;
         let part_sha256 = sha256_hex(&part_data);
 
         if manifest
@@ -2677,25 +2112,6 @@ async fn main() -> Result<()> {
                     save_config_url(url)?;
                     println!("{} Base URL set to: {}", "✓".green(), url.cyan());
                 }
-                ConfigAction::Ai { action } => match action {
-                    AiConfigAction::Install { target, force, yes } => {
-                        let (selection, explicit) =
-                            resolve_ai_selection(target, Some(AiPreset::All));
-                        install_ai_skills(options.json, selection, *force, explicit, *yes)?;
-                    }
-                    AiConfigAction::Remove { target, force, yes } => {
-                        let (selection, explicit) =
-                            resolve_ai_selection(target, Some(AiPreset::All));
-                        remove_ai_skills(options.json, selection, *force, explicit, *yes)?;
-                    }
-                    AiConfigAction::Status { target } => {
-                        let (selection, _) = resolve_ai_selection(target, Some(AiPreset::All));
-                        print_ai_skill_status(options.json, selection)?;
-                    }
-                    AiConfigAction::Presets => {
-                        print_ai_presets(options.json)?;
-                    }
-                },
                 ConfigAction::Show => {
                     print_config_show(options.json)?;
                 }
@@ -2727,7 +2143,6 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use clap::error::ErrorKind;
-    use std::fs;
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
@@ -2990,148 +2405,30 @@ mod tests {
     }
 
     #[test]
+    fn default_expiry_is_one_year() {
+        let options = UploadOptions::default();
+        assert_eq!(effective_expire(&options).as_deref(), Some("365d"));
+    }
+
+    #[test]
+    fn modes_override_default_expiry() {
+        let temporary = UploadOptions {
+            mode: Some(ShareMode::Temporary),
+            ..UploadOptions::default()
+        };
+        let permanent = UploadOptions {
+            mode: Some(ShareMode::Permanent),
+            ..UploadOptions::default()
+        };
+
+        assert_eq!(effective_expire(&temporary).as_deref(), Some("1h"));
+        assert_eq!(effective_expire(&permanent).as_deref(), Some("never"));
+    }
+
+    #[test]
     fn lowercase_v_is_version_flag() {
         let err = Cli::try_parse_from(["shrd", "-v"]).expect_err("version should exit early");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
-    }
-
-    #[test]
-    fn cli_supports_config_ai_install() {
-        let cli = Cli::try_parse_from(["shrd", "config", "ai", "install", "claude-code"])
-            .expect("cli should parse");
-
-        match cli.command {
-            Some(Commands::Config {
-                options,
-                action:
-                    ConfigAction::Ai {
-                        action: AiConfigAction::Install { target, force, yes },
-                    },
-            }) => {
-                assert!(!options.json);
-                assert_eq!(target.tool, Some(AiTool::ClaudeCode));
-                assert_eq!(target.preset, None);
-                assert!(!force);
-                assert!(!yes);
-            }
-            _ => panic!("expected config ai install command"),
-        }
-    }
-
-    #[test]
-    fn cli_supports_claude_alias_for_ai_tool() {
-        let cli = Cli::try_parse_from(["shrd", "config", "ai", "install", "claude"])
-            .expect("cli should parse");
-
-        match cli.command {
-            Some(Commands::Config {
-                action:
-                    ConfigAction::Ai {
-                        action: AiConfigAction::Install { target, .. },
-                    },
-                ..
-            }) => assert_eq!(target.tool, Some(AiTool::ClaudeCode)),
-            _ => panic!("expected config ai install command"),
-        }
-    }
-
-    #[test]
-    fn cli_supports_config_ai_install_without_target() {
-        let cli =
-            Cli::try_parse_from(["shrd", "config", "ai", "install"]).expect("cli should parse");
-
-        match cli.command {
-            Some(Commands::Config {
-                action:
-                    ConfigAction::Ai {
-                        action: AiConfigAction::Install { target, yes, .. },
-                    },
-                ..
-            }) => {
-                assert_eq!(target.tool, None);
-                assert_eq!(target.preset, None);
-                assert!(!yes);
-            }
-            _ => panic!("expected config ai install command"),
-        }
-    }
-
-    #[test]
-    fn cli_supports_config_ai_install_with_preset() {
-        let cli = Cli::try_parse_from([
-            "shrd", "config", "ai", "install", "--preset", "all", "--yes",
-        ])
-        .expect("cli should parse");
-
-        match cli.command {
-            Some(Commands::Config {
-                action:
-                    ConfigAction::Ai {
-                        action: AiConfigAction::Install { target, yes, .. },
-                    },
-                ..
-            }) => {
-                assert_eq!(target.tool, None);
-                assert_eq!(target.preset, Some(AiPreset::All));
-                assert!(yes);
-            }
-            _ => panic!("expected config ai install command"),
-        }
-    }
-
-    #[test]
-    fn cli_keeps_legacy_all_target_for_ai_install() {
-        let cli = Cli::try_parse_from(["shrd", "config", "ai", "install", "all"])
-            .expect("cli should parse");
-
-        match cli.command {
-            Some(Commands::Config {
-                action:
-                    ConfigAction::Ai {
-                        action: AiConfigAction::Install { target, .. },
-                    },
-                ..
-            }) => assert_eq!(target.tool, Some(AiTool::All)),
-            _ => panic!("expected config ai install command"),
-        }
-    }
-
-    #[test]
-    fn config_json_flag_reaches_ai_subcommands() {
-        let cli = Cli::try_parse_from(["shrd", "config", "ai", "status", "--json"])
-            .expect("cli should parse");
-
-        match cli.command {
-            Some(Commands::Config {
-                options,
-                action:
-                    ConfigAction::Ai {
-                        action: AiConfigAction::Status { target },
-                    },
-            }) => {
-                assert!(options.json);
-                assert_eq!(target.tool, None);
-                assert_eq!(target.preset, None);
-            }
-            _ => panic!("expected config ai status command"),
-        }
-    }
-
-    #[test]
-    fn cli_supports_config_ai_presets() {
-        let cli =
-            Cli::try_parse_from(["shrd", "config", "ai", "presets"]).expect("cli should parse");
-
-        match cli.command {
-            Some(Commands::Config {
-                action:
-                    ConfigAction::Ai {
-                        action: AiConfigAction::Presets,
-                    },
-                ..
-            }) => {}
-            _ => panic!("expected config ai presets command"),
-        }
     }
 
     #[test]
@@ -3173,142 +2470,5 @@ mod tests {
         assert!(help.contains("  list"));
         assert!(help.contains("[aliases: recent]"));
         assert!(help.contains("shrd list"));
-    }
-
-    #[test]
-    fn shrd_skill_content_matches_current_cli_surface() {
-        let skill = canonical_shrd_skill();
-        assert!(skill.contains("shrd upload path/to/file"));
-        assert!(skill.contains("shrd get last"));
-        assert!(skill.contains("shrd list"));
-        assert!(skill.contains("--mode <mode>"));
-        assert!(!skill.contains("shrd login"));
-        assert!(!skill.contains("shrd logout"));
-        assert!(!skill.contains("shrd whoami"));
-    }
-
-    #[test]
-    fn resolve_ai_skill_targets_uses_expected_paths() {
-        let home = PathBuf::from("/tmp/home");
-        let xdg = PathBuf::from("/tmp/xdg");
-        let targets =
-            resolve_ai_skill_targets_from_roots(&home, &xdg, AiSelection::Preset(AiPreset::All));
-
-        let paths: Vec<(AiTool, PathBuf)> = targets
-            .into_iter()
-            .map(|target| (target.tool, target.skill_file))
-            .collect();
-
-        assert!(paths.contains(&(
-            AiTool::Cursor,
-            home.join(".cursor")
-                .join("skills")
-                .join("shrd")
-                .join("SKILL.md"),
-        )));
-        assert!(paths.contains(&(
-            AiTool::Codex,
-            home.join(".codex")
-                .join("skills")
-                .join("shrd")
-                .join("SKILL.md"),
-        )));
-        assert!(paths.contains(&(
-            AiTool::ClaudeCode,
-            home.join(".claude")
-                .join("skills")
-                .join("shrd")
-                .join("SKILL.md"),
-        )));
-        assert!(paths.contains(&(
-            AiTool::Opencode,
-            xdg.join("opencode")
-                .join("skills")
-                .join("shrd")
-                .join("SKILL.md"),
-        )));
-    }
-
-    #[test]
-    fn resolve_ai_selection_defaults_to_all_preset() {
-        let (selection, explicit) = resolve_ai_selection(&AiTargetOptions::default(), None);
-
-        assert_eq!(selection, AiSelection::Preset(AiPreset::All));
-        assert!(!explicit);
-    }
-
-    #[test]
-    fn resolve_ai_selection_prefers_explicit_tool() {
-        let (selection, explicit) = resolve_ai_selection(
-            &AiTargetOptions {
-                tool: Some(AiTool::Codex),
-                preset: None,
-            },
-            Some(AiPreset::All),
-        );
-
-        assert_eq!(selection, AiSelection::Tool(AiTool::Codex));
-        assert!(explicit);
-    }
-
-    #[test]
-    fn install_ai_skill_writes_canonical_skill() {
-        let root = std::env::temp_dir().join(format!("shrd-ai-install-{}", unix_now()));
-        let target = AiSkillTarget {
-            tool: AiTool::Codex,
-            skill_dir: root.join("skill"),
-            skill_file: root.join("skill").join("SKILL.md"),
-        };
-
-        install_ai_skill_target(&target, false).expect("install should succeed");
-
-        let written = fs::read_to_string(&target.skill_file).expect("skill should exist");
-        assert_eq!(written, canonical_shrd_skill());
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn install_ai_skill_requires_force_for_customized_skill() {
-        let root = std::env::temp_dir().join(format!("shrd-ai-custom-{}", unix_now()));
-        let target = AiSkillTarget {
-            tool: AiTool::Cursor,
-            skill_dir: root.join("skill"),
-            skill_file: root.join("skill").join("SKILL.md"),
-        };
-
-        fs::create_dir_all(&target.skill_dir).expect("skill dir");
-        fs::write(&target.skill_file, "custom skill").expect("custom skill");
-
-        let err = install_ai_skill_target(&target, false).expect_err("install should fail");
-        assert!(err.to_string().contains("--force"));
-
-        install_ai_skill_target(&target, true).expect("forced install should succeed");
-        let written = fs::read_to_string(&target.skill_file).expect("skill should exist");
-        assert_eq!(written, canonical_shrd_skill());
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn remove_ai_skill_requires_force_for_extra_files() {
-        let root = std::env::temp_dir().join(format!("shrd-ai-remove-{}", unix_now()));
-        let target = AiSkillTarget {
-            tool: AiTool::Opencode,
-            skill_dir: root.join("skill"),
-            skill_file: root.join("skill").join("SKILL.md"),
-        };
-
-        fs::create_dir_all(&target.skill_dir).expect("skill dir");
-        fs::write(&target.skill_file, canonical_shrd_skill()).expect("canonical skill");
-        fs::write(target.skill_dir.join("notes.txt"), "custom").expect("extra file");
-
-        let err = remove_ai_skill_target(&target, false).expect_err("remove should fail");
-        assert!(err.to_string().contains("--force"));
-
-        remove_ai_skill_target(&target, true).expect("forced remove should succeed");
-        assert!(!target.skill_dir.exists());
-
-        let _ = fs::remove_dir_all(root);
     }
 }

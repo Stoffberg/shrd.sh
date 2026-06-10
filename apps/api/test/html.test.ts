@@ -35,6 +35,7 @@ describe("HTML font assets", () => {
     expect(html).not.toContain('<div id="loading" class="loading-box">')
     expect(html).not.toContain('<div id="error" class="error-box">')
     expect(html).not.toContain("#content { display: none; }")
+    expect(html).not.toContain("marked")
   })
 
   it("hides encrypted content until decryption completes", () => {
@@ -47,7 +48,16 @@ describe("HTML font assets", () => {
     expect(html).toContain('<div id="loading" class="loading-box">')
     expect(html).toContain('<div id="error" class="error-box">')
     expect(html).toContain('<div class="content-box" id="content"></div>')
+    expect(html).toContain(".error-box {\n      display: none;")
     expect(html).toContain("document.getElementById('content').style.display = 'block';")
+    expect(html).not.toContain("marked")
+  })
+
+  it("linkifies text without a browser-side markdown runtime", () => {
+    const html = renderContentPage("open https://example.com/path", createMetadata(), "https://shrd.sh")
+
+    expect(html).toContain('<a href="https://example.com/path" target="_blank" rel="noopener">https://example.com/path</a>')
+    expect(html).not.toContain("marked")
   })
 
   it("renders browser-friendly binary previews inline", () => {
