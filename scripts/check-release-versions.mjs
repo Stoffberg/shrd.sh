@@ -14,9 +14,17 @@ function readJson(path) {
 
 const cargoToml = readFileSync("cli/Cargo.toml", "utf8")
 const cargoVersion = cargoToml.match(/^version = "([^"]+)"/m)?.[1]
+const cargoRepository = cargoToml.match(/^repository = "([^"]+)"/m)?.[1]
+const expectedRepository = "https://github.com/Stoffberg/shrd.sh"
 
 if (!cargoVersion) {
   console.error("Could not read cli/Cargo.toml version")
+  process.exit(1)
+}
+
+if (cargoRepository !== expectedRepository) {
+  console.error(`Expected cli/Cargo.toml repository to be ${expectedRepository}`)
+  console.error(`cli/Cargo.toml: ${cargoRepository ?? "missing"}`)
   process.exit(1)
 }
 
@@ -32,4 +40,4 @@ if (mismatches.length > 0) {
   process.exit(1)
 }
 
-console.log(`Release versions aligned at ${cargoVersion}`)
+console.log(`Release metadata aligned at ${cargoVersion}`)
