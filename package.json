@@ -1,6 +1,6 @@
 {
   "name": "shrd",
-  "version": "0.1.0",
+  "version": "0.1.12",
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
@@ -16,11 +16,12 @@
     "test:compat": "pnpm --filter @shrd/api test:compat && cargo check --manifest-path cli/Cargo.toml --locked --no-default-features",
     "test:e2e": "pnpm --filter @shrd/api test:e2e",
     "test:integration": "pnpm --filter @shrd/api test:integration",
-    "ci:core": "pnpm lint && pnpm test:unit && pnpm test:compat && pnpm --filter @shrd/api build",
+    "ci:core": "pnpm lint && pnpm release:check && pnpm test:unit && pnpm test:compat && pnpm --filter @shrd/api build",
     "ci:full": "pnpm ci:core && pnpm test:e2e",
     "deploy": "turbo deploy",
     "db:generate": "pnpm --filter @shrd/db generate",
-    "db:migrate": "pnpm --filter @shrd/db migrate"
+    "db:migrate": "pnpm --filter @shrd/db migrate",
+    "release:check": "node scripts/check-release-versions.mjs"
   },
   "devDependencies": {
     "turbo": "^2.7.6",

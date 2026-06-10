@@ -7,6 +7,7 @@
 - Made one-year expiry the default, with `temporary`, `private`, and `permanent` modes for explicit overrides.
 - Share URLs now serve file bytes directly instead of HTML previews.
 - Root lint and CI now run real TypeScript and Rust checks.
+- Release metadata now uses one version across the workspace and CLI crate.
 
 ### Added
 - Multipart upload support for large files.

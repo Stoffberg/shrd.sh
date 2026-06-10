@@ -39,6 +39,9 @@ jobs:
           cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' cli/Cargo.toml | head -1)
           test "${{ steps.version.outputs.version }}" = "$cargo_version"
 
+      - name: Check release metadata
+        run: node scripts/check-release-versions.mjs
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2

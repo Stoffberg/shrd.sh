@@ -4,7 +4,7 @@ Ordered by impact on a cold senior-engineer review. An item is closed only after
 
 ## Open
 
-1. [ ] Release metadata is inconsistent. Root package is `0.1.0`, CLI crate is `0.1.12`, and package versions do not tell a clear release story.
+No open items.
 
 ## Closed
 
@@ -16,3 +16,4 @@ Ordered by impact on a cold senior-engineer review. An item is closed only after
 6. [x] Public docs beyond README were stale. Deleted obsolete `PLAN.md` and `SELF_HOSTING.md`, replaced `CONTRIBUTING.md` with the current setup/checks/layout, refreshed `CHANGELOG.md`, and updated `AGENTS.md` after the web workspace deletion. Verified stale web/auth/default-expiry/integration-script references with `rg`, then ran `pnpm build` and `pnpm ci:full`.
 7. [x] API metrics code still carried removed browser/stats concepts. Deleted `readsHtml`, public stats aggregation helpers, content-type rollups, storage snapshots, and scheduled snapshot writes while keeping core internal upload/read/error counters. Worker dry-run size dropped from 155.52 KiB / gzip 33.57 KiB to 151.00 KiB / gzip 32.76 KiB. Verified removed symbols with `rg`, then ran `pnpm build`, `pnpm ci:full`, and `pnpm --filter @shrd/api test:integration`.
 8. [x] CLI implementation was a 2,474-line `main.rs`. Split behavior into focused modules for app dispatch, crypto, share references, support helpers, upload, download, output, and tests. `main.rs` is now 482 lines and the largest implementation files are 561 lines. Verified with `cargo check --manifest-path cli/Cargo.toml --locked`, `cargo fmt --manifest-path cli/Cargo.toml -- --check`, `cargo clippy --manifest-path cli/Cargo.toml --locked --all-targets -- -D warnings`, `cargo test --manifest-path cli/Cargo.toml --locked`, `pnpm build`, and `pnpm ci:full`.
+9. [x] Release metadata was inconsistent. Aligned root, API, SDK, DB, shared package manifests, and `cli/Cargo.toml` on `0.1.12`; added `scripts/check-release-versions.mjs`; wired `pnpm release:check` into `ci:core`; and added the same metadata check to the CLI release workflow before artifact builds. Verified with `pnpm release:check`, `pnpm install --frozen-lockfile`, `pnpm build`, and `pnpm ci:full`.
