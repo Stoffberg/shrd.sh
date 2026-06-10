@@ -120,6 +120,23 @@ jobs:
           cd dist
           tar -czvf "../${{ matrix.name }}.tar.gz" ./*
 
+      - name: Validate package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          tar -tzf "${{ matrix.name }}.tar.gz"
+          test -x dist/shrd
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu|x86_64-unknown-linux-musl)
+              ./dist/shrd --version
+              ;;
+            x86_64-apple-darwin)
+              if [ "$(uname -m)" = "x86_64" ]; then ./dist/shrd --version; fi
+              ;;
+            aarch64-apple-darwin)
+              if [ "$(uname -m)" = "arm64" ]; then ./dist/shrd --version; fi
+              ;;
+          esac
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -129,6 +146,13 @@ jobs:
           cp README.md dist/
           cd dist
           7z a -tzip "../${{ matrix.name }}.zip" ./*
+
+      - name: Validate package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          7z l "${{ matrix.name }}.zip"
+          Test-Path dist/shrd.exe
+          dist/shrd.exe --version
 
       - name: Upload artifact (Unix)
         if: runner.os != 'Windows'
