@@ -6,7 +6,7 @@ import type {
   ShareKind,
   StoredContent,
 } from "./types"
-import { hasD1, shouldUseLegacyFallback, supportsD1Feature } from "./d1"
+import { hasD1, shouldUseLegacyFallback } from "./d1"
 
 const KV_SIZE_LIMIT = 25 * 1024
 const CANONICAL_PREFIX = "canonical:"
@@ -61,34 +61,12 @@ type MultipartPartRow = {
   size: number
 }
 
-async function canUseCanonicalD1(env: Env): Promise<boolean> {
-  return supportsD1Feature(
-    env,
-    "canonical-storage",
-    `SELECT
-      content_type,
-      filename,
-      max_views,
-      inline_body,
-      inline_body_encoding,
-      last_accessed_at
-    FROM shares
-    LIMIT 1`
-  )
+function canUseCanonicalD1(env: Env): boolean {
+  return hasD1(env)
 }
 
-async function canUseMultipartD1(env: Env): Promise<boolean> {
-  return supportsD1Feature(
-    env,
-    "multipart-storage",
-    `SELECT
-      upload_id,
-      resume_token,
-      delete_token,
-      ttl_seconds
-    FROM multipart_sessions
-    LIMIT 1`
-  )
+function canUseMultipartD1(env: Env): boolean {
+  return hasD1(env)
 }
 
 async function getJson<T>(env: Env, key: string): Promise<T | null> {
@@ -164,7 +142,7 @@ async function getCanonicalRow(env: Env, id: string): Promise<CanonicalRow | nul
     return null
   }
 
-  if (await canUseCanonicalD1(env)) {
+  if (canUseCanonicalD1(env)) {
     try {
       const row = await env.DB.prepare(
         `SELECT
@@ -268,7 +246,7 @@ async function deleteCanonicalShare(
     return false
   }
 
-  if (await canUseCanonicalD1(env)) {
+  if (canUseCanonicalD1(env)) {
     try {
       if (existing.storageType === "r2") {
         await env.STORAGE.delete(existing.storageKey || id)
@@ -325,7 +303,7 @@ export async function shareExists(env: Env, id: string): Promise<boolean> {
     return true
   }
 
-  if (await canUseMultipartD1(env)) {
+  if (canUseMultipartD1(env)) {
     try {
       const multipart = await env.DB.prepare("SELECT id FROM multipart_sessions WHERE id = ? LIMIT 1")
         .bind(id)
@@ -358,7 +336,7 @@ export async function storeContent(
   const storageType = contentSize <= KV_SIZE_LIMIT ? "kv" : "r2"
   metadata.storageType = storageType
 
-  if (await canUseCanonicalD1(env)) {
+  if (canUseCanonicalD1(env)) {
     try {
       if (storageType === "r2") {
         await env.STORAGE.put(id, content, {
@@ -450,7 +428,7 @@ export async function storeBlobMetadata(
 ): Promise<void> {
   metadata.storageType = "r2"
 
-  if (await canUseCanonicalD1(env)) {
+  if (canUseCanonicalD1(env)) {
     try {
       await env.DB.prepare(
         `INSERT INTO shares (
@@ -615,7 +593,7 @@ export async function incrementViews(
 ): Promise<void> {
   const canonical = await getCanonicalRow(env, id)
   if (canonical) {
-    if (await canUseCanonicalD1(env)) {
+    if (canUseCanonicalD1(env)) {
       try {
         await env.DB.prepare(
           `UPDATE shares
@@ -686,7 +664,7 @@ export async function createMultipartSession(
   env: Env,
   session: MultipartUploadSession
 ): Promise<void> {
-  if (await canUseMultipartD1(env)) {
+  if (canUseMultipartD1(env)) {
     try {
       await env.DB.prepare(
         `INSERT INTO multipart_sessions (
@@ -744,7 +722,7 @@ export async function getMultipartSession(
   env: Env,
   id: string
 ): Promise<MultipartUploadSession | null> {
-  if (await canUseMultipartD1(env)) {
+  if (canUseMultipartD1(env)) {
     try {
       const session = await env.DB.prepare(
         `SELECT
@@ -838,7 +816,7 @@ export async function saveMultipartPart(
   session: MultipartUploadSession,
   part: { partNumber: number; etag: string; sha256: string; size: number }
 ): Promise<void> {
-  if (await canUseMultipartD1(env)) {
+  if (canUseMultipartD1(env)) {
     try {
       await env.DB.prepare(
         `INSERT INTO multipart_parts (session_id, part_number, etag, sha256, size)
@@ -873,7 +851,7 @@ export async function deleteMultipartSession(
   id: string,
   uploadId?: string
 ): Promise<void> {
-  if (await canUseMultipartD1(env)) {
+  if (canUseMultipartD1(env)) {
     try {
       const session = uploadId
         ? { uploadId }
@@ -901,7 +879,7 @@ export async function deleteMultipartSession(
 }
 
 export async function cleanupExpiredShares(env: Env): Promise<number> {
-  if (!(await canUseCanonicalD1(env))) {
+  if (!canUseCanonicalD1(env)) {
     return 0
   }
 
@@ -935,7 +913,7 @@ export async function cleanupExpiredShares(env: Env): Promise<number> {
 }
 
 export async function cleanupStaleMultipartSessions(env: Env): Promise<number> {
-  if (!(await canUseMultipartD1(env))) {
+  if (!canUseMultipartD1(env)) {
     return 0
   }
 
@@ -967,7 +945,7 @@ export async function shareExistsForStorageKey(
   env: Env,
   storageKey: string
 ): Promise<boolean> {
-  if (await canUseCanonicalD1(env)) {
+  if (canUseCanonicalD1(env)) {
     try {
       const row = await env.DB.prepare(
         "SELECT id FROM shares WHERE storage_key = ? LIMIT 1"

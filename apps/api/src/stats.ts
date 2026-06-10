@@ -1,5 +1,5 @@
 import type { ContentMetadata, Env } from "./types"
-import { shouldUseLegacyFallback, supportsD1Feature } from "./d1"
+import { hasD1, shouldUseLegacyFallback } from "./d1"
 
 const METRICS_PREFIX = "metrics:"
 
@@ -37,27 +37,8 @@ const ZERO_METRICS: DailyMetrics = {
   bytesUploaded: 0,
 }
 
-async function canUseMetricsD1(env: Env): Promise<boolean> {
-  return supportsD1Feature(
-    env,
-    "daily-metrics",
-    `SELECT
-      uploads_total,
-      uploads_inline,
-      uploads_multipart,
-      reads_raw,
-      reads_meta,
-      deletes,
-      not_found,
-      errors_4xx,
-      errors_5xx,
-      idempotency_hits,
-      idempotency_conflicts,
-      multipart_resumes,
-      bytes_uploaded
-    FROM daily_metrics
-    LIMIT 1`
-  )
+function canUseMetricsD1(env: Env): boolean {
+  return hasD1(env)
 }
 
 function today(): string {
@@ -83,7 +64,7 @@ export async function recordMetrics(env: Env, delta: MetricsDelta): Promise<void
   const day = today()
   const normalized = normalizeMetrics(delta)
 
-  if (await canUseMetricsD1(env)) {
+  if (canUseMetricsD1(env)) {
     try {
       await env.DB.prepare(
         `INSERT INTO daily_metrics (

@@ -1,5 +1,5 @@
 import type { Env } from "./types"
-import { hasD1, shouldUseLegacyFallback, supportsD1Feature } from "./d1"
+import { hasD1, shouldUseLegacyFallback } from "./d1"
 
 const IDEMPOTENCY_PREFIX = "idempotency:"
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000
@@ -24,19 +24,8 @@ export type IdempotencyReservation =
   | { kind: "conflict" }
   | { kind: "in_progress" }
 
-async function canUseIdempotencyD1(env: Env): Promise<boolean> {
-  return supportsD1Feature(
-    env,
-    "idempotency",
-    `SELECT
-      idempotency_key,
-      request_hash,
-      response_json,
-      response_status,
-      resource_id
-    FROM idempotency_keys
-    LIMIT 1`
-  )
+function canUseIdempotencyD1(env: Env): boolean {
+  return hasD1(env)
 }
 
 function stableStringify(value: unknown): string {
@@ -104,7 +93,7 @@ export async function reserveIdempotency(
   const now = new Date()
   const expiresAt = new Date(now.getTime() + IDEMPOTENCY_TTL_MS).toISOString()
 
-  if (await canUseIdempotencyD1(env)) {
+  if (canUseIdempotencyD1(env)) {
     try {
       const existing = await env.DB.prepare(
         `SELECT
@@ -210,7 +199,7 @@ export async function completeIdempotency(
 ): Promise<void> {
   const responseJson = JSON.stringify(response)
 
-  if (await canUseIdempotencyD1(env)) {
+  if (canUseIdempotencyD1(env)) {
     try {
       await env.DB.prepare(
         `UPDATE idempotency_keys
@@ -244,7 +233,7 @@ export async function clearIdempotency(
   scope: string,
   idempotencyKey: string
 ): Promise<void> {
-  if (await canUseIdempotencyD1(env)) {
+  if (canUseIdempotencyD1(env)) {
     try {
       await env.DB.prepare(
         "DELETE FROM idempotency_keys WHERE scope = ? AND idempotency_key = ?"
