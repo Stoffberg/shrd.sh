@@ -242,6 +242,46 @@ function isResponse(value: unknown): value is Response {
   return value instanceof Response
 }
 
+type MultipartCompletionValidation =
+  | { valid: true; parts: MultipartUploadSession["parts"] }
+  | { valid: false; error: string }
+
+function validateMultipartCompletion(
+  session: MultipartUploadSession,
+  totalSize: number
+): MultipartCompletionValidation {
+  const parts = session.parts
+    .slice()
+    .sort((left, right) => left.partNumber - right.partNumber)
+  if (parts.length === 0) {
+    return { valid: false, error: "Multipart upload has no parts" }
+  }
+
+  let uploadedSize = 0
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index]
+    if (part.partNumber !== index + 1) {
+      return { valid: false, error: "Multipart upload is missing parts" }
+    }
+    if (part.size <= 0) {
+      return { valid: false, error: "Multipart part size is invalid" }
+    }
+    if (index < parts.length - 1 && part.size !== session.partSize) {
+      return {
+        valid: false,
+        error: "Multipart upload has an incomplete non-final part",
+      }
+    }
+    uploadedSize += part.size
+  }
+
+  if (uploadedSize !== totalSize) {
+    return { valid: false, error: "Multipart upload size mismatch" }
+  }
+
+  return { valid: true, parts }
+}
+
 function baseMetadata(
   id: string,
   now: Date,
@@ -695,11 +735,16 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
         throw new Error("403:Invalid upload ID")
       }
 
+      const validation = validateMultipartCompletion(session, parsedSize)
+      if (!validation.valid) {
+        throw new Error(`400:${validation.error}`)
+      }
+
       const multipartUpload = c.env.STORAGE.resumeMultipartUpload(id, uploadId)
-      const sortedParts = session.parts
-        .slice()
-        .sort((left, right) => left.partNumber - right.partNumber)
-        .map((part) => ({ partNumber: part.partNumber, etag: part.etag }))
+      const sortedParts = validation.parts.map((part) => ({
+        partNumber: part.partNumber,
+        etag: part.etag,
+      }))
 
       await multipartUpload.complete(sortedParts)
 

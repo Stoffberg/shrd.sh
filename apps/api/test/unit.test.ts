@@ -868,6 +868,76 @@ describe("Multipart uploads", () => {
     expect(conflict.status).toBe(409)
   })
 
+  it("rejects multipart completion when uploaded size does not match", async () => {
+    const initRes = await app.request("/api/v1/multipart/init", {
+      method: "POST",
+      headers: {
+        "X-Content-Type": "application/octet-stream",
+      },
+    }, env)
+    const init = await initRes.json() as JsonResponse
+    const checksum = await sha256Hex("hello")
+
+    const partRes = await app.request(`/api/v1/multipart/${init.id}/part/1`, {
+      method: "PUT",
+      headers: {
+        "X-Upload-Id": init.uploadId as string,
+        "X-Part-SHA256": checksum,
+      },
+      body: "hello",
+    }, env)
+
+    expect(partRes.status).toBe(200)
+
+    const completeRes = await app.request(`/api/v1/multipart/${init.id}/complete`, {
+      method: "POST",
+      headers: {
+        "X-Upload-Id": init.uploadId as string,
+        "X-Total-Size": "6",
+      },
+    }, env)
+
+    expect(completeRes.status).toBe(400)
+    expect(await completeRes.json()).toMatchObject({
+      error: "Multipart upload size mismatch",
+    })
+  })
+
+  it("rejects multipart completion when earlier parts are missing", async () => {
+    const initRes = await app.request("/api/v1/multipart/init", {
+      method: "POST",
+      headers: {
+        "X-Content-Type": "application/octet-stream",
+      },
+    }, env)
+    const init = await initRes.json() as JsonResponse
+    const checksum = await sha256Hex("hello")
+
+    const partRes = await app.request(`/api/v1/multipart/${init.id}/part/2`, {
+      method: "PUT",
+      headers: {
+        "X-Upload-Id": init.uploadId as string,
+        "X-Part-SHA256": checksum,
+      },
+      body: "hello",
+    }, env)
+
+    expect(partRes.status).toBe(200)
+
+    const completeRes = await app.request(`/api/v1/multipart/${init.id}/complete`, {
+      method: "POST",
+      headers: {
+        "X-Upload-Id": init.uploadId as string,
+        "X-Total-Size": "5",
+      },
+    }, env)
+
+    expect(completeRes.status).toBe(400)
+    expect(await completeRes.json()).toMatchObject({
+      error: "Multipart upload is missing parts",
+    })
+  })
+
   it("aborts multipart uploads with the resume token", async () => {
     const initRes = await app.request("/api/v1/multipart/init", {
       method: "POST",
