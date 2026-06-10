@@ -5,7 +5,6 @@ import {
   createMultipartSession,
   deleteContent,
   deleteMultipartSession,
-  getContent,
   getContentStream,
   getMetadata,
   getMultipartSession,
@@ -22,14 +21,14 @@ import {
   notFoundResponse,
   runAsync,
 } from "./cache"
-import { getServedContentType, renderBinaryPage, render404, renderContentPage, isBinaryContent } from "./html"
+import { getContentDisposition, getServedContentType } from "./content"
 import {
   clearIdempotency,
   completeIdempotency,
   hashIdempotencyPayload,
   reserveIdempotency,
 } from "./idempotency"
-import { getContentTypeStats, getStorageStats, getSummaryStats, recordMetrics, recordUploadMetrics } from "./stats"
+import { recordMetrics, recordUploadMetrics } from "./stats"
 
 const generateId = customAlphabet("23456789abcdefghjkmnpqrstuvwxyz", 6)
 const generateDeleteToken = customAlphabet(
@@ -184,14 +183,6 @@ async function jsonError(
   return c.json({ error }, status as 400 | 401 | 403 | 404 | 409 | 500)
 }
 
-async function htmlNotFound(env: Env) {
-  await recordErrorStatus(env, 404, true)
-  return new Response(render404(), {
-    status: 404,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
-  })
-}
-
 async function withIdempotency<T>(
   c: { env: Env; req: { header(name: string): string | undefined } },
   scope: string,
@@ -249,18 +240,6 @@ async function withIdempotency<T>(
 
 function isResponse(value: unknown): value is Response {
   return value instanceof Response
-}
-
-function parseStatsWindow(value?: string | null): "24h" | "7d" | "30d" | null {
-  if (!value) {
-    return "24h"
-  }
-
-  if (value === "24h" || value === "7d" || value === "30d") {
-    return value
-  }
-
-  return null
 }
 
 function baseMetadata(
@@ -758,66 +737,9 @@ export function registerRoutes(app: Hono<{ Bindings: Env }>) {
     return c.json(idempotent.body, 201)
   })
 
-  app.get("/api/v1/stats/summary", async (c) => {
-    const window = parseStatsWindow(c.req.query("window"))
-    if (!window) {
-      return jsonError(c, "Invalid window", 400)
-    }
-
-    return c.json(await getSummaryStats(c.env, window))
-  })
-
-  app.get("/api/v1/stats/content-types", async (c) => {
-    const window = parseStatsWindow(c.req.query("window"))
-    if (!window) {
-      return jsonError(c, "Invalid window", 400)
-    }
-
-    const limit = Number.parseInt(c.req.query("limit") ?? "10", 10)
-    if (!Number.isInteger(limit) || limit <= 0) {
-      return jsonError(c, "Invalid limit", 400)
-    }
-
-    return c.json(await getContentTypeStats(c.env, window, limit))
-  })
-
-  app.get("/api/v1/stats/storage", async (c) => {
-    return c.json(await getStorageStats(c.env))
-  })
-
   app.get("/:id", async (c) => {
     const id = c.req.param("id")
-    const accept = c.req.header("Accept") ?? ""
     const ctx = getExecutionContext(c)
-
-    if (accept.includes("text/html")) {
-      const metadata = await getMetadata(c.env, id)
-      if (!metadata) {
-        return htmlNotFound(c.env)
-      }
-
-      await recordMetrics(c.env, { readsHtml: 1 })
-
-      if (metadata.maxViews !== undefined) {
-        await incrementViews(c.env, id)
-        if (metadata.views + 1 >= metadata.maxViews) {
-          runAsync(ctx, deleteContent(c.env, id))
-        }
-      } else {
-        runAsync(ctx, incrementViews(c.env, id))
-      }
-
-      if (isBinaryContent(metadata.contentType, metadata.filename)) {
-        return c.html(renderBinaryPage(metadata, c.env.BASE_URL))
-      }
-
-      const result = await getContent(c.env, id)
-      if (!result) {
-        return htmlNotFound(c.env)
-      }
-
-      return c.html(renderContentPage(result.content, metadata, c.env.BASE_URL))
-    }
 
     return getFromCacheOrFetch(
       c.req.raw,
@@ -908,6 +830,7 @@ async function handleContentRequest(
 
   const { metadata, body } = result
   const servedContentType = getServedContentType(metadata.contentType, metadata.filename)
+  const contentDisposition = getContentDisposition(metadata.id, metadata.filename, metadata.name)
   if (metadata.maxViews !== undefined) {
     await incrementViews(env, id)
     if (metadata.views + 1 >= metadata.maxViews) {
@@ -916,6 +839,7 @@ async function handleContentRequest(
     return new Response(body, {
       headers: {
         "Content-Type": servedContentType,
+        "Content-Disposition": contentDisposition,
         "Cache-Control": "no-store, no-cache, must-revalidate",
       },
     })
@@ -929,6 +853,7 @@ async function handleContentRequest(
   return new Response(body, {
     headers: {
       "Content-Type": servedContentType,
+      "Content-Disposition": contentDisposition,
       "Cache-Control": `public, max-age=${maxAge}, immutable`,
     },
   })

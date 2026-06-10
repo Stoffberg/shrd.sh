@@ -73,9 +73,9 @@ describe("API integration", () => {
     expect(await raw.text()).toBe(content)
   })
 
-  it("keeps metadata and browser HTML compatible", async () => {
-    const name = uniqueName("integration_html")
-    const created = await createTextShare("see https://example.com", {
+  it("keeps metadata and share URL downloads compatible", async () => {
+    const name = uniqueName("integration_file")
+    const created = await createTextShare("file payload", {
       name,
       filename: "note.txt",
       contentType: "text/plain",
@@ -92,11 +92,11 @@ describe("API integration", () => {
       storageType: "kv",
     })
 
-    const html = await fetch(created.url, { headers: { Accept: "text/html" } })
-    expect(html.status).toBe(200)
-    const body = await html.text()
-    expect(body).toContain('<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>')
-    expect(body).not.toContain("marked")
+    const file = await fetch(created.url, { headers: { Accept: "text/html" } })
+    expect(file.status).toBe(200)
+    expect(file.headers.get("content-type")).toContain("text/plain")
+    expect(file.headers.get("content-disposition")).toContain("note.txt")
+    expect(await file.text()).toBe("file payload")
   })
 
   it("round trips direct uploads", async () => {

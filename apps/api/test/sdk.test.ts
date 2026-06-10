@@ -53,25 +53,48 @@ describe("SDK client", () => {
     expect(fetch).toHaveBeenCalledWith("https://test.shrd.sh/custom_slug/raw")
   })
 
-  it("requests metadata for named shares", async () => {
+  it("uploads file bodies through the direct upload endpoint", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
-      id: "release_notes",
-      contentType: "text/plain",
-      size: 12,
-      views: 2,
-      createdAt: new Date().toISOString(),
+      id: "payload",
+      url: "https://test.shrd.sh/payload",
+      rawUrl: "https://test.shrd.sh/payload/raw",
+      deleteToken: "token",
       expiresAt: null,
-      filename: "notes.txt",
-      encrypted: false,
-      name: "release_notes",
-      storageType: "kv",
-    }), { status: 200 }))
+      name: "payload",
+    }), { status: 201 }))
 
     const client = createClient({ baseUrl: "https://test.shrd.sh" })
-    const meta = await client.meta("release_notes")
+    const result = await client.upload("file body", {
+      contentType: "text/plain",
+      filename: "payload.txt",
+      name: "payload",
+      expire: "365d",
+    })
 
-    expect(meta.name).toBe("release_notes")
-    expect(meta.storageType).toBe("kv")
-    expect(fetch).toHaveBeenCalledWith("https://test.shrd.sh/release_notes/meta")
+    expect(result.rawUrl).toBe("https://test.shrd.sh/payload/raw")
+    expect(fetch).toHaveBeenCalledWith("https://test.shrd.sh/api/v1/upload", expect.objectContaining({
+      method: "POST",
+      headers: {
+        "X-Content-Type": "text/plain",
+        "X-Filename": "payload.txt",
+        "X-Name": "payload",
+        "X-Expire": "365d",
+      },
+      body: "file body",
+    }))
+  })
+
+  it("downloads file responses without assuming text", async () => {
+    const response = new Response("payload", {
+      status: 200,
+      headers: { "Content-Type": "application/octet-stream" },
+    })
+    vi.mocked(fetch).mockResolvedValueOnce(response)
+
+    const client = createClient({ baseUrl: "https://test.shrd.sh" })
+    const downloaded = await client.download("payload")
+
+    expect(downloaded).toBe(response)
+    expect(fetch).toHaveBeenCalledWith("https://test.shrd.sh/payload/raw")
   })
 })

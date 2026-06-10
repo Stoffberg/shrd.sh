@@ -51,7 +51,7 @@ describe("Compatibility contract", () => {
     expect(daysFromNow(body.expiresAt as string)).toBeGreaterThan(364)
   })
 
-  it("keeps metadata fields required by CLI and browser clients", async () => {
+  it("keeps metadata fields required by CLI clients", async () => {
     const env = createMockEnv()
     const created = await app.request("/api/v1/upload", {
       method: "POST",
@@ -98,20 +98,20 @@ describe("Compatibility contract", () => {
     expect((await json(multipart)).id).toBe("compat_multipart")
   })
 
-  it("keeps browser renderer self-contained for plain text shares", async () => {
+  it("serves share URLs as direct file downloads", async () => {
     const env = createMockEnv()
     const created = await app.request("/api/v1/push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: "see https://example.com", name: "compat_html" }),
+      body: JSON.stringify({ content: "file payload", filename: "payload.txt", name: "compat_file" }),
     }, env)
     expect(created.status).toBe(201)
 
-    const html = await app.request("/compat_html", {
+    const file = await app.request("/compat_file", {
       headers: { Accept: "text/html" },
     }, env)
-    const body = await html.text()
-    expect(body).toContain('<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>')
-    expect(body).not.toContain("marked")
+    expect(file.headers.get("content-type")).toContain("text/plain")
+    expect(file.headers.get("content-disposition")).toContain("payload.txt")
+    expect(await file.text()).toBe("file payload")
   })
 })

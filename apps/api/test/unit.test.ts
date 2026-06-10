@@ -615,46 +615,18 @@ describe("Get content endpoints", () => {
     expect(content).toBe("Test content")
   })
 
-  it("returns HTML page with Accept: text/html", async () => {
+  it("serves file bytes with attachment headers for browser accept headers", async () => {
     const res = await app.request(`/${testId}`, {
       headers: { "Accept": "text/html" },
     }, env)
-    
+
     expect(res.status).toBe(200)
-    expect(res.headers.get("content-type")).toContain("text/html")
-    const html = await res.text()
-    expect(html).toContain("<!DOCTYPE html>")
-    expect(html).toContain("Test content")
-    expect(html).toContain('id="copy-btn"')
+    expect(res.headers.get("content-type")).toContain("text/plain")
+    expect(res.headers.get("content-disposition")).toContain("attachment")
+    expect(await res.text()).toBe("Test content")
   })
 
-  it("includes product metadata on HTML share pages", async () => {
-    const createRes = await app.request("/api/v1/push", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: "launch checklist",
-        name: "release_notes",
-        expire: "never",
-        encrypted: true,
-        burn: true,
-      }),
-    }, env)
-
-    const created = await createRes.json() as JsonResponse
-    const htmlRes = await app.request(`/${created.id}`, {
-      headers: { "Accept": "text/html" },
-    }, env)
-
-    expect(htmlRes.status).toBe(200)
-    const html = await htmlRes.text()
-    expect(html).toContain("release_notes")
-    expect(html).toContain("encrypted")
-    expect(html).toContain("view once")
-    expect(html).toContain("This content will be deleted after you leave this page.")
-  })
-
-  it("exposes burn metadata for the CLI and web clients", async () => {
+  it("exposes burn metadata for CLI clients", async () => {
     const createRes = await app.request("/api/v1/push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -923,43 +895,6 @@ describe("Multipart uploads", () => {
     }, env)
 
     expect(statusRes.status).toBe(404)
-  })
-})
-
-describe("Stats endpoints", () => {
-  it("reports aggregate upload and read metrics", async () => {
-    const env = createMockEnv()
-    const createRes = await app.request("/api/v1/push", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: "{\"ok\":true}",
-        contentType: "application/json",
-      }),
-    }, env)
-    const created = await createRes.json() as JsonResponse
-    await app.request(`/${created.id}/meta`, {}, env)
-    await app.request(`/${created.id}/raw`, {}, env)
-    await app.request("/missing/raw", {}, env)
-
-    const summaryRes = await app.request("/api/v1/stats/summary?window=24h", {}, env)
-    const summary = await summaryRes.json() as JsonResponse
-    expect(summary.uploadsTotal).toBe(1)
-    expect(summary.uploadsInline).toBe(1)
-    expect(summary.readsMeta).toBe(1)
-    expect(summary.readsRaw).toBe(1)
-    expect(summary.notFound).toBe(1)
-
-    const contentTypesRes = await app.request("/api/v1/stats/content-types?window=24h&limit=5", {}, env)
-    const contentTypes = await contentTypesRes.json() as JsonResponse
-    expect(contentTypes.items).toEqual([
-      { contentType: "application/json", uploads: 1, bytes: 11 },
-    ])
-
-    const storageRes = await app.request("/api/v1/stats/storage", {}, env)
-    const storage = await storageRes.json() as JsonResponse
-    expect(storage.latestSnapshot).toBeNull()
-    expect(storage.series).toEqual([])
   })
 })
 

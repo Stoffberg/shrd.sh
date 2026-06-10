@@ -126,18 +126,4 @@ describe("CLI and API e2e", () => {
     expect(get.status).toBe(0)
     expect(get.stdout).toBe(payload)
   })
-
-  it("keeps recent history compatible with get last", async () => {
-    const upload = await run(["upload", "--no-copy", "recent content"])
-    expect(upload.status).toBe(0)
-    const url = extractUrl(upload.stdout)
-
-    const list = await run(["list", "--json"])
-    expect(list.status).toBe(0)
-    expect(JSON.parse(list.stdout).entries[0]).toMatchObject({ url })
-
-    const get = await run(["get", "last", "--raw", "--output", "-"])
-    expect(get.status).toBe(0)
-    expect(get.stdout).toBe("recent content")
-  })
 })

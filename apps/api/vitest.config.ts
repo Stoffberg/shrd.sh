@@ -5,7 +5,7 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: [
-      "test/html.test.ts",
+      "test/content.test.ts",
       "test/sdk.test.ts",
       "test/shared.test.ts",
       "test/unit.test.ts",

@@ -10,6 +10,16 @@ export interface PushOptions {
   encrypt?: boolean;
 }
 
+export interface UploadOptions {
+  contentType?: string;
+  filename?: string;
+  expire?: ExpireDuration;
+  expiresIn?: number | ExpireDuration;
+  name?: string;
+  burn?: boolean;
+  encrypt?: boolean;
+}
+
 interface PushResponsePayload {
   id: string;
   url: string;
@@ -21,19 +31,6 @@ interface PushResponsePayload {
 
 export interface PushResult extends PushResponsePayload {
   raw: string;
-}
-
-export interface ShareMetadata {
-  id: string;
-  contentType: string;
-  size: number;
-  views: number;
-  createdAt: string;
-  expiresAt: string | null;
-  filename: string | null;
-  encrypted: boolean;
-  name: string | null;
-  storageType: "kv" | "r2";
 }
 
 export interface ShrdConfig {
@@ -77,8 +74,34 @@ function normalizePushResult(payload: PushResponsePayload): PushResult {
   };
 }
 
+function uploadHeaders(options: UploadOptions): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (options.contentType) headers["X-Content-Type"] = options.contentType;
+  if (options.filename) headers["X-Filename"] = options.filename;
+  if (options.expire) headers["X-Expire"] = options.expire;
+  if (options.expiresIn !== undefined) headers["X-Expires-In"] = String(options.expiresIn);
+  if (options.name) headers["X-Name"] = options.name;
+  if (options.burn) headers["X-Burn"] = "true";
+  if (options.encrypt) headers["X-Encrypted"] = "true";
+  return headers;
+}
+
 export function createClient(config: ShrdConfig = {}) {
   const baseUrl = getBaseUrl(config);
+
+  async function download(id: string): Promise<Response> {
+    const cleanId = extractId(id, baseUrl);
+    const response = await fetch(`${baseUrl}/${cleanId}/raw`);
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error("Share not found or expired");
+      }
+      throw new Error(`Download failed: ${response.status}`);
+    }
+
+    return response;
+  }
 
   return {
     async push(content: string, options: PushOptions = {}): Promise<PushResult> {
@@ -101,46 +124,25 @@ export function createClient(config: ShrdConfig = {}) {
       return normalizePushResult(await response.json() as PushResponsePayload);
     },
 
-    async pull(id: string): Promise<string> {
-      const cleanId = extractId(id, baseUrl);
-      const response = await fetch(`${baseUrl}/${cleanId}/raw`);
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error("Share not found or expired");
-        }
-        throw new Error(`Pull failed: ${response.status}`);
-      }
-
-      return response.text();
-    },
-
-    async meta(id: string): Promise<ShareMetadata> {
-      const cleanId = extractId(id, baseUrl);
-      const response = await fetch(`${baseUrl}/${cleanId}/meta`);
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error("Share not found or expired");
-        }
-        throw new Error(`Meta failed: ${response.status}`);
-      }
-
-      return response.json() as Promise<ShareMetadata>;
-    },
-
-    async delete(id: string, deleteToken: string): Promise<void> {
-      const cleanId = extractId(id, baseUrl);
-      const response = await fetch(`${baseUrl}/api/v1/${cleanId}`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${deleteToken}`,
-        },
+    async upload(body: RequestInit["body"], options: UploadOptions = {}): Promise<PushResult> {
+      const response = await fetch(`${baseUrl}/api/v1/upload`, {
+        method: "POST",
+        headers: uploadHeaders(options),
+        body,
       });
 
       if (!response.ok) {
-        throw new Error(`Delete failed: ${response.status}`);
+        const error = await response.text();
+        throw new Error(`Upload failed: ${response.status} - ${error}`);
       }
+
+      return normalizePushResult(await response.json() as PushResponsePayload);
+    },
+
+    download,
+
+    async pull(id: string): Promise<string> {
+      return (await download(id)).text();
     },
   };
 }
@@ -149,9 +151,9 @@ const defaultClient = createClient();
 
 export const shrd = {
   push: defaultClient.push,
+  upload: defaultClient.upload,
+  download: defaultClient.download,
   pull: defaultClient.pull,
-  meta: defaultClient.meta,
-  delete: defaultClient.delete,
   createClient,
 };
 
