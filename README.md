@@ -285,7 +285,6 @@ cp apps/api/wrangler.toml.example apps/api/wrangler.toml
 Apply migrations and deploy:
 
 ```bash
-pnpm --filter @shrd/db generate
 cd apps/api
 wrangler d1 migrations apply shrd-db --remote
 wrangler deploy
