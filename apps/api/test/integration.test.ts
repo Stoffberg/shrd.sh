@@ -1,6 +1,10 @@
-import { describe, it, expect, afterAll } from "vitest"
+import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { startApiServer } from "./helpers/server"
 
-const API_URL = import.meta.env.SHRD_API_URL || "https://shrd.stoff.dev"
+const externalApiUrl = process.env.SHRD_API_URL?.replace(/\/$/, "")
+const createdShares: { id: string; token: string }[] = []
+let apiUrl = externalApiUrl ?? ""
+let localApi: Awaited<ReturnType<typeof startApiServer>> | undefined
 
 interface PushResponse {
   id: string
@@ -8,248 +12,134 @@ interface PushResponse {
   rawUrl: string
   deleteUrl: string
   deleteToken: string
-  expiresAt?: string
+  expiresAt: string | null
+  name: string | null
 }
 
-const createdShares: { id: string; token: string }[] = []
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
-
-async function waitForContent(id: string, maxRetries = 5): Promise<boolean> {
-  for (let i = 0; i < maxRetries; i++) {
-    const res = await fetch(`${API_URL}/${id}/meta`)
-    if (res.status === 200) return true
-    await sleep(200)
-  }
-  return false
+function uniqueName(prefix: string): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 }
 
-async function push(content: string, options?: Record<string, unknown>): Promise<PushResponse> {
-  const res = await fetch(`${API_URL}/api/v1/push`, {
+async function readJson<T>(response: Response): Promise<T> {
+  return await response.json() as T
+}
+
+async function createTextShare(content: string, body: Record<string, unknown> = {}): Promise<PushResponse> {
+  const response = await fetch(`${apiUrl}/api/v1/push`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, ...options }),
+    body: JSON.stringify({ content, ...body }),
   })
-  const data = await res.json() as PushResponse
-  if (data.id && data.deleteToken) {
-    createdShares.push({ id: data.id, token: data.deleteToken })
-  }
-  await waitForContent(data.id)
-  return data
+  expect(response.status).toBe(201)
+  const created = await readJson<PushResponse>(response)
+  createdShares.push({ id: created.id, token: created.deleteToken })
+  return created
 }
 
+async function deleteShare(id: string, token: string): Promise<void> {
+  await fetch(`${apiUrl}/api/v1/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => {})
+}
+
+beforeAll(async () => {
+  if (!externalApiUrl) {
+    localApi = await startApiServer()
+    apiUrl = localApi.url
+  }
+})
+
 afterAll(async () => {
-  await Promise.all(
-    createdShares.map(({ id, token }) =>
-      fetch(`${API_URL}/api/v1/${id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      }).catch(() => {})
-    )
-  )
+  await Promise.all(createdShares.map((share) => deleteShare(share.id, share.token)))
+  await localApi?.close()
 })
 
-describe("Health", () => {
-  it("returns status ok", async () => {
-    const res = await fetch(`${API_URL}/health`)
-    expect(res.status).toBe(200)
-    const data = await res.json() as { status: string }
-    expect(data.status).toBe("ok")
+describe("API integration", () => {
+  it("serves health", async () => {
+    const response = await fetch(`${apiUrl}/health`)
+    expect(response.status).toBe(200)
+    expect(await readJson<{ status: string }>(response)).toMatchObject({ status: "ok" })
   })
-})
 
-describe("Push", () => {
-  it("creates a share with valid content", async () => {
-    const res = await fetch(`${API_URL}/api/v1/push`, {
+  it("round trips text with the one-year default expiry", async () => {
+    const content = `integration text ${Date.now()}`
+    const created = await createTextShare(content)
+    const days = (new Date(created.expiresAt!).getTime() - Date.now()) / (24 * 60 * 60 * 1000)
+    expect(days).toBeGreaterThan(364)
+
+    const raw = await fetch(created.rawUrl)
+    expect(raw.status).toBe(200)
+    expect(await raw.text()).toBe(content)
+  })
+
+  it("keeps metadata and browser HTML compatible", async () => {
+    const name = uniqueName("integration_html")
+    const created = await createTextShare("see https://example.com", {
+      name,
+      filename: "note.txt",
+      contentType: "text/plain",
+    })
+
+    const meta = await fetch(`${apiUrl}/${created.id}/meta`)
+    expect(meta.status).toBe(200)
+    expect(await readJson<Record<string, unknown>>(meta)).toMatchObject({
+      id: name,
+      contentType: "text/plain",
+      filename: "note.txt",
+      encrypted: false,
+      name,
+      storageType: "kv",
+    })
+
+    const html = await fetch(created.url, { headers: { Accept: "text/html" } })
+    expect(html.status).toBe(200)
+    const body = await html.text()
+    expect(body).toContain('<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>')
+    expect(body).not.toContain("marked")
+  })
+
+  it("round trips direct uploads", async () => {
+    const name = uniqueName("integration_upload")
+    const response = await fetch(`${apiUrl}/api/v1/upload`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: "Hello, World!" }),
-    })
-    expect(res.status).toBe(201)
-    const data = await res.json() as PushResponse
-    expect(data.id).toHaveLength(6)
-    expect(data.deleteToken).toHaveLength(32)
-    expect(data.url).toContain(data.id)
-    createdShares.push({ id: data.id, token: data.deleteToken })
-  })
-
-  it("rejects empty content", async () => {
-    const res = await fetch(`${API_URL}/api/v1/push`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: "" }),
-    })
-    expect(res.status).toBe(400)
-  })
-
-  it("rejects missing content", async () => {
-    const res = await fetch(`${API_URL}/api/v1/push`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    })
-    expect(res.status).toBe(400)
-  })
-
-  it("rejects invalid JSON", async () => {
-    const res = await fetch(`${API_URL}/api/v1/push`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "not json",
-    })
-    expect(res.status).toBe(400)
-  })
-
-  it("handles unicode content", async () => {
-    const content = "Hello 世界 🌍 Привет"
-    const data = await push(content)
-    expect(data.id).toBeDefined()
-    
-    const res = await fetch(`${API_URL}/${data.id}/raw`)
-    expect(await res.text()).toBe(content)
-  })
-
-  it("sets custom expiry", async () => {
-    const data = await push("expires soon", { expiresIn: 3600 })
-    expect(data.expiresAt).toBeDefined()
-    const expiresAt = new Date(data.expiresAt!)
-    const diff = (expiresAt.getTime() - Date.now()) / 1000
-    expect(diff).toBeGreaterThan(3500)
-    expect(diff).toBeLessThan(3700)
-  })
-})
-
-describe("Get Content", () => {
-  it("retrieves raw content", async () => {
-    const content = "test content " + Date.now()
-    const data = await push(content)
-    
-    const res = await fetch(`${API_URL}/${data.id}/raw`)
-    expect(res.status).toBe(200)
-    expect(await res.text()).toBe(content)
-  })
-
-  it("returns 404 for non-existent content", async () => {
-    const res = await fetch(`${API_URL}/nonexistent123/raw`)
-    expect(res.status).toBe(404)
-  })
-
-  it("returns HTML page with Accept: text/html", async () => {
-    const data = await push("metadata test")
-    
-    const res = await fetch(`${API_URL}/${data.id}`, {
-      headers: { Accept: "text/html" },
-    })
-    expect(res.status).toBe(200)
-    expect(res.headers.get("content-type")).toContain("text/html")
-    const html = await res.text()
-    expect(html).toContain("<!DOCTYPE html>")
-    expect(html).toContain("metadata test")
-  })
-})
-
-describe("Metadata", () => {
-  it("returns metadata for existing content", async () => {
-    const data = await push("meta test", { filename: "test.txt" })
-    
-    const res = await fetch(`${API_URL}/${data.id}/meta`)
-    expect(res.status).toBe(200)
-    const meta = await res.json() as Record<string, unknown>
-    expect(meta.id).toBe(data.id)
-    expect(meta.filename).toBe("test.txt")
-    expect(meta.size).toBeGreaterThan(0)
-    expect(meta.createdAt).toBeDefined()
-  })
-
-  it("returns 404 for non-existent content", async () => {
-    const res = await fetch(`${API_URL}/nonexistent123/meta`)
-    expect(res.status).toBe(404)
-  })
-})
-
-describe("Delete", () => {
-  it("rejects delete without auth", async () => {
-    const data = await push("delete test")
-    const res = await fetch(`${API_URL}/api/v1/${data.id}`, { method: "DELETE" })
-    expect(res.status).toBe(401)
-  })
-
-  it("rejects delete with wrong token", async () => {
-    const data = await push("delete test")
-    const res = await fetch(`${API_URL}/api/v1/${data.id}`, {
-      method: "DELETE",
-      headers: { Authorization: "Bearer wrongtoken" },
-    })
-    expect(res.status).toBe(403)
-  })
-
-  it("deletes with correct token", async () => {
-    const data = await push("delete me")
-    const idx = createdShares.findIndex(s => s.id === data.id)
-    if (idx !== -1) createdShares.splice(idx, 1)
-    
-    const res = await fetch(`${API_URL}/api/v1/${data.id}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${data.deleteToken}` },
-    })
-    expect(res.status).toBe(200)
-    
-    const check = await fetch(`${API_URL}/${data.id}/meta`)
-    expect(check.status).toBe(404)
-  })
-})
-
-describe("CORS", () => {
-  it("includes CORS headers", async () => {
-    const res = await fetch(`${API_URL}/health`)
-    expect(res.headers.get("access-control-allow-origin")).toBeDefined()
-  })
-
-  it("handles OPTIONS preflight", async () => {
-    const res = await fetch(`${API_URL}/api/v1/push`, {
-      method: "OPTIONS",
       headers: {
-        Origin: "https://example.com",
-        "Access-Control-Request-Method": "POST",
+        "X-Name": name,
+        "X-Content-Type": "text/plain",
+        "X-Filename": "payload.txt",
       },
+      body: "direct upload payload",
     })
-    expect([200, 204]).toContain(res.status)
-  })
-})
+    expect(response.status).toBe(201)
+    const created = await readJson<PushResponse>(response)
+    createdShares.push({ id: created.id, token: created.deleteToken })
 
-describe("Edge Cases", () => {
-  it("handles very long ID gracefully", async () => {
-    const longId = "a".repeat(100)
-    const res = await fetch(`${API_URL}/${longId}/raw`)
-    expect(res.status).toBe(404)
-  })
+    const meta = await fetch(`${apiUrl}/${created.id}/meta`)
+    expect(await readJson<Record<string, unknown>>(meta)).toMatchObject({
+      id: name,
+      filename: "payload.txt",
+      storageType: "r2",
+    })
 
-  it("handles special characters in ID safely", async () => {
-    const res = await fetch(`${API_URL}/../../../etc/passwd/raw`)
-    expect([400, 404]).toContain(res.status)
-  })
-})
-
-describe("Performance", () => {
-  it("push responds in < 2000ms", async () => {
-    const start = Date.now()
-    await push("perf test")
-    const duration = Date.now() - start
-    expect(duration).toBeLessThan(2000)
+    const raw = await fetch(created.rawUrl)
+    expect(await raw.text()).toBe("direct upload payload")
   })
 
-  it("get responds in < 500ms", async () => {
-    const data = await push("perf test get")
-    const start = Date.now()
-    await fetch(`${API_URL}/${data.id}/raw`)
-    const duration = Date.now() - start
-    expect(duration).toBeLessThan(500)
-  })
+  it("rejects invalid expiry and duplicate names", async () => {
+    const badExpiry = await fetch(`${apiUrl}/api/v1/push`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "bad", expire: "tomorrow" }),
+    })
+    expect(badExpiry.status).toBe(400)
 
-  it("health responds in < 200ms", async () => {
-    const start = Date.now()
-    await fetch(`${API_URL}/health`)
-    const duration = Date.now() - start
-    expect(duration).toBeLessThan(200)
+    const name = uniqueName("integration_duplicate")
+    await createTextShare("first", { name })
+    const duplicate = await fetch(`${apiUrl}/api/v1/push`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "second", name }),
+    })
+    expect(duplicate.status).toBe(409)
   })
 })

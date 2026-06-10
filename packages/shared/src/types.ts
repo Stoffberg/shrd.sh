@@ -1,4 +1,4 @@
-export type PresetExpireDuration = "1h" | "24h" | "7d" | "30d" | "never";
+export type PresetExpireDuration = "1h" | "24h" | "7d" | "30d" | "365d" | "never";
 export type ExpireDuration = PresetExpireDuration | `${number}h` | `${number}d`;
 
 export type UserTier = "free" | "pro" | "api" | "team";
@@ -22,7 +22,7 @@ export interface CreateShareRequest {
   contentType?: string;
   filename?: string;
   expire?: ExpireDuration;
-  expiresIn?: number;
+  expiresIn?: number | ExpireDuration;
   burn?: boolean;
   encrypted?: boolean;
   name?: string;
@@ -59,5 +59,6 @@ export const EXPIRY_MS: Record<PresetExpireDuration, number | null> = {
   "24h": 24 * 60 * 60 * 1000,
   "7d": 7 * 24 * 60 * 60 * 1000,
   "30d": 30 * 24 * 60 * 60 * 1000,
+  "365d": 365 * 24 * 60 * 60 * 1000,
   "never": null,
 };

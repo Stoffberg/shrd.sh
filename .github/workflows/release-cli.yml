@@ -17,9 +17,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify:
+    name: Verify Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/cli-v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate version
+        run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' cli/Cargo.toml | head -1)
+          test "${{ steps.version.outputs.version }}" = "$cargo_version"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+
+      - name: Test CLI
+        working-directory: cli
+        run: |
+          cargo test --locked
+          cargo check --locked --no-default-features
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    needs: [verify]
     strategy:
       fail-fast: false
       matrix:
@@ -109,20 +144,11 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [verify, build]
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ needs.verify.outputs.version }}
     steps:
       - uses: actions/checkout@v5
-
-      - name: Get version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF#refs/tags/cli-v}" >> $GITHUB_OUTPUT
-          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -139,11 +165,21 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Validate release files
+        run: |
+          test -f release/shrd-x86_64-unknown-linux-gnu.tar.gz
+          test -f release/shrd-x86_64-unknown-linux-musl.tar.gz
+          test -f release/shrd-aarch64-unknown-linux-gnu.tar.gz
+          test -f release/shrd-x86_64-apple-darwin.tar.gz
+          test -f release/shrd-aarch64-apple-darwin.tar.gz
+          test -f release/shrd-x86_64-pc-windows-msvc.zip
+          test -f release/SHA256SUMS
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: cli-v${{ steps.version.outputs.version }}
-          name: CLI v${{ steps.version.outputs.version }}
+          tag_name: cli-v${{ needs.verify.outputs.version }}
+          name: CLI v${{ needs.verify.outputs.version }}
           files: release/*
           generate_release_notes: true
           draft: false

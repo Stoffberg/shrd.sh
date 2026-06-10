@@ -13,11 +13,21 @@
       "dependsOn": ["^build"]
     },
     "typecheck": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^typecheck"]
     },
     "test": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^test"],
       "outputs": ["coverage/**"]
+    },
+    "test:unit": {
+      "outputs": ["coverage/**"]
+    },
+    "test:compat": {},
+    "test:e2e": {
+      "cache": false
+    },
+    "test:integration": {
+      "cache": false
     },
     "deploy": {
       "dependsOn": ["build"]

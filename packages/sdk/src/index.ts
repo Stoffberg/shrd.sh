@@ -4,7 +4,7 @@ export interface PushOptions {
   contentType?: string;
   filename?: string;
   expire?: ExpireDuration;
-  expiresIn?: number;
+  expiresIn?: number | ExpireDuration;
   name?: string;
   burn?: boolean;
   encrypt?: boolean;

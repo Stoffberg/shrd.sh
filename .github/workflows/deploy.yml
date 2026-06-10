@@ -22,12 +22,17 @@ jobs:
         with:
           node-version: "20"
           cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile --filter @shrd/api --filter @shrd/db --filter @shrd/sdk --filter @shrd/shared
 
-      - name: Run tests
-        run: pnpm test
+      - name: Run API checks
+        run: |
+          pnpm typecheck:core
+          pnpm --filter @shrd/api test:unit
+          pnpm --filter @shrd/api test:compat
+          pnpm --filter @shrd/api build
 
   deploy-api:
     name: Deploy API
@@ -42,9 +47,10 @@ jobs:
         with:
           node-version: "20"
           cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile --filter @shrd/api --filter @shrd/db --filter @shrd/sdk --filter @shrd/shared
 
       - name: Deploy API to Cloudflare
         working-directory: apps/api
@@ -66,9 +72,10 @@ jobs:
         with:
           node-version: "20"
           cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile --filter @shrd/web
 
       - name: Build web app
         working-directory: apps/web
@@ -94,9 +101,10 @@ jobs:
         with:
           node-version: "20"
           cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile --filter @shrd/api --filter @shrd/sdk --filter @shrd/shared
 
       - name: Wait for deployment
         run: sleep 10
