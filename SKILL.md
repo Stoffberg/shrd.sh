@@ -16,6 +16,14 @@ command -v shrd || { brew tap Stoffberg/tap && brew install shrd; }
 shrd --version
 ```
 
+If Homebrew refuses `stoffberg/tap/shrd` because tap trust is required, trust only the formula and retry:
+
+```bash
+brew trust --formula stoffberg/tap/shrd
+brew upgrade shrd || brew reinstall shrd
+shrd --version
+```
+
 Default service: `https://shrd.stoff.dev`.
 
 For another server:
@@ -67,6 +75,37 @@ Useful download flags:
 - `--open`: save to a temp file and open with the default app.
 - `--copy`: copy fetched text to the clipboard.
 - `--meta`: print metadata JSON instead of downloading content.
+
+## Remote File Transfer
+
+For shell-over-HTTP, SSH, or any remote command runner with request timeouts, avoid sending binary output back through the command response. Upload locally, stream raw bytes to a remote `.part` file, move it into place, then compare hashes.
+
+Local side:
+
+```bash
+sha256=$(shasum -a 256 ./file.mp4 | awk '{print $1}')
+url=$(shrd upload ./file.mp4 --mode temporary --no-copy --json | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(d).url))')
+printf '%s\n%s\n' "$sha256" "$url"
+```
+
+Remote side:
+
+```bash
+out="$HOME/Desktop/file.mp4"
+tmp="$out.part"
+rm -f "$tmp"
+shrd get "$url" --raw --output - > "$tmp"
+mv -f "$tmp" "$out"
+shasum -a 256 "$out"
+```
+
+If the remote command runner has a short timeout, run the remote download in the background and poll a text log. Do not log the raw download stream.
+
+```bash
+log="/tmp/shrd-transfer-$(date +%s).log"
+( set -e; shrd get "$url" --raw --output - > "$tmp"; mv -f "$tmp" "$out"; ls -lh "$out"; shasum -a 256 "$out" ) > "$log" 2>&1 &
+printf 'PID=%s\nLOG=%s\n' "$!" "$log"
+```
 
 ## Recent Shares
 
