@@ -12,7 +12,7 @@ concurrency:
 jobs:
   test:
     name: Test Before Deploy
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v5
 
@@ -36,7 +36,7 @@ jobs:
 
   deploy-api:
     name: Deploy API
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [test]
     steps:
       - uses: actions/checkout@v5
@@ -61,7 +61,7 @@ jobs:
 
   post-deploy-smoke:
     name: Post-Deploy Smoke
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [deploy-api]
     steps:
       - uses: actions/checkout@v5

@@ -13,7 +13,7 @@ concurrency:
 jobs:
   core:
     name: Core Checks
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v5
 
@@ -45,17 +45,17 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: blacksmith-4vcpu-ubuntu-2404
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: blacksmith-4vcpu-ubuntu-2404
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: blacksmith-4vcpu-ubuntu-2404
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: blacksmith-6vcpu-macos-latest
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: blacksmith-6vcpu-macos-latest
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: blacksmith-4vcpu-windows-2025
     steps:
       - uses: actions/checkout@v5
 

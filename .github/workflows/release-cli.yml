@@ -19,7 +19,7 @@ env:
 jobs:
   verify:
     name: Verify Release
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -63,22 +63,22 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: blacksmith-4vcpu-ubuntu-2404
             name: shrd-x86_64-unknown-linux-gnu
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: blacksmith-4vcpu-ubuntu-2404
             name: shrd-x86_64-unknown-linux-musl
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: blacksmith-4vcpu-ubuntu-2404
             name: shrd-aarch64-unknown-linux-gnu
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: blacksmith-6vcpu-macos-latest
             name: shrd-x86_64-apple-darwin
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: blacksmith-6vcpu-macos-latest
             name: shrd-aarch64-apple-darwin
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: blacksmith-4vcpu-windows-2025
             name: shrd-x86_64-pc-windows-msvc
 
     steps:
@@ -170,7 +170,7 @@ jobs:
 
   release:
     name: Create Release
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [verify, build]
     outputs:
       version: ${{ needs.verify.outputs.version }}
@@ -214,7 +214,7 @@ jobs:
 
   update-homebrew:
     name: Update Homebrew Formula
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [release]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
