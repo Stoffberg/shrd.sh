@@ -72,13 +72,13 @@ jobs:
             os: blacksmith-4vcpu-ubuntu-2404
             name: shrd-aarch64-unknown-linux-gnu
           - target: x86_64-apple-darwin
-            os: blacksmith-6vcpu-macos-latest
+            os: macos-latest
             name: shrd-x86_64-apple-darwin
           - target: aarch64-apple-darwin
-            os: blacksmith-6vcpu-macos-latest
+            os: macos-latest
             name: shrd-aarch64-apple-darwin
           - target: x86_64-pc-windows-msvc
-            os: blacksmith-4vcpu-windows-2025
+            os: windows-latest
             name: shrd-x86_64-pc-windows-msvc
 
     steps:
